@@ -1,0 +1,305 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "XPARQ Node RPC",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/status": {
+      "get": {
+        "summary": "Get node and chain status",
+        "responses": {
+          "200": {
+            "description": "Node status"
+          }
+        }
+      }
+    },
+    "/fee-policy": {
+      "get": {
+        "summary": "Get relay fee and protocol burn policy",
+        "responses": {
+          "200": {
+            "description": "Fee policy"
+          }
+        }
+      }
+    },
+    "/transaction": {
+      "post": {
+        "summary": "Submit a signed canonical Borsh AuthorizedProgramEnvelope",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "contentEncoding": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted transaction ID"
+          },
+          "400": {
+            "description": "Invalid transaction"
+          }
+        }
+      }
+    },
+    "/program/deploy": {
+      "post": {
+        "summary": "Submit a canonical Borsh AuthorizedDeployProgram to the operation mempool",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted operation ID"
+          },
+          "400": {
+            "description": "Invalid deploy"
+          }
+        },
+        "description": "Request bytes are AuthorizedDeployProgram, without a BlockOperation wrapper. Returns operation_id."
+      }
+    },
+    "/program/deploy/quote": {
+      "post": {
+        "summary": "Quote the next-block deploy burn and authorization commitment before signing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Program ID, exact protocol burn, authorization commitment, height and tip hash"
+          },
+          "400": {
+            "description": "Invalid deploy quote"
+          }
+        },
+        "description": "Request bytes are a draft AuthorizedDeployProgram before signing. Burn is in raw XPQ units; submission revalidates the quote."
+      }
+    },
+    "/balance/{address}": {
+      "get": {
+        "summary": "Get account balances",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Balance"
+          }
+        }
+      }
+    },
+    "/account/{address}": {
+      "get": {
+        "summary": "Get account UTXOs",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account state"
+          }
+        }
+      }
+    },
+    "/coin-origin/{share}": {
+      "get": {
+        "summary": "Get canonical creation transaction and block height for a coin share",
+        "parameters": [
+          {
+            "name": "share",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Coin origin or null if absent"
+          }
+        }
+      }
+    },
+    "/program/quote": {
+      "post": {
+        "summary": "Quote canonical extension state growth for a signed Program transaction without submitting it",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "created_state_weight in bytes and canonical tip_hash; payment burn is not checked during quote"
+          },
+          "400": {
+            "description": "Invalid Program quote request"
+          }
+        },
+        "description": "Verifies signed envelope authorization and previews asset state growth. Does not check exact payment burn or funding availability; this is not a VM fuel quote."
+      }
+    },
+    "/program/asset/{asset}": {
+      "get": {
+        "summary": "Get Program asset metadata, supply and mint nonce",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AssetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical kernel-owned asset metadata"
+          }
+        }
+      }
+    },
+    "/program/asset/{asset}/balance/{address}": {
+      "get": {
+        "summary": "Get Program asset balance and shares",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AssetId"
+          },
+          {
+            "$ref": "#/components/parameters/Address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw unit amount strings and owned shares"
+          }
+        }
+      }
+    },
+    "/blocks/latest": {
+      "get": {
+        "summary": "Get latest blocks",
+        "responses": {
+          "200": {
+            "description": "Blocks with hash (block hash), transaction_hashes (transaction ID array), and transaction_details"
+          }
+        }
+      }
+    },
+    "/block/{height}": {
+      "get": {
+        "summary": "Get block by height",
+        "parameters": [
+          {
+            "name": "height",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Block with hash (block hash), transaction_hashes (transaction ID array; empty for genesis), and transaction_details"
+          }
+        }
+      }
+    },
+    "/explorer/address/{address}": {
+      "get": {
+        "summary": "Get address activity",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address activity"
+          }
+        }
+      }
+    },
+    "/explorer/transaction/{transaction_id}": {
+      "get": {
+        "summary": "Get confirmed transaction",
+        "parameters": [
+          {
+            "name": "transaction_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Address": {
+        "name": "address",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "AssetId": {
+        "name": "asset",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/AssetId"
+        }
+      }
+    },
+    "schemas": {
+      "AssetId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  }
+}

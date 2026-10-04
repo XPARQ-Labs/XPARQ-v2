@@ -1,0 +1,315 @@
+use kernel::{
+    common::ChainContext,
+    consensus::{ProtocolBurn, StateTransitionWeight},
+    crypto::{
+        AccountSignatureScheme, Address, SigningSeed, address_from_public_key, canonical_bytes,
+        canonical_decode,
+    },
+    ledger::{CoinUtxo, LedgerState, StateError},
+    monetary::coin::{CoinOutput, CoinShare, Zeno},
+    operation::BlockOperation,
+    program::{
+        AccountAuthorization, AuthorizedProgramInvocation, CoinCharges, CoinTransition,
+        application::{ApplicationExecutor, AssetHost, NoApplications},
+        program_created_state_weight_with_applications, program_invocation_commitment,
+        system::{
+            asset_program::{
+                asset::{AssetError, Unit},
+                opcode::AssetOpcode,
+                type_::{AssetCall, Mint, Register},
+            },
+            coin_program::{CoinHost, TransferError},
+            script::call::{ProgramCall, SystemProgramId},
+        },
+    },
+};
+
+fn seed() -> SigningSeed {
+    SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([21; 32]))
+}
+
+fn funded() -> LedgerState {
+    let owner = address_from_public_key(&seed().public_key());
+    let amount = Zeno::from_zeno(10_000_000);
+    let coins = std::collections::BTreeMap::from([(
+        CoinShare::from_bytes([1; 16]),
+        CoinUtxo { owner, amount },
+    )]);
+    LedgerState {
+        utxos: canonical_decode(&canonical_bytes(&(coins, amount)).unwrap()).unwrap(),
+        coin: kernel::ledger::CoinRecord {
+            total_mined: amount,
+            total_burned: Zeno::ZERO,
+        },
+        ..LedgerState::default()
+    }
+}
+
+fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvocation {
+    let seed = seed();
+    let signer = address_from_public_key(&seed.public_key());
+    let chain = ChainContext::new([7; 32]);
+    let (input, coin) = state
+        .utxos
+        .coins()
+        .find(|(_, coin)| coin.owner == signer)
+        .unwrap();
+    let fee = Zeno::ONE;
+    let build = |burn: u64| {
+        let payment = CoinTransition::coin_with_charges(
+            signer,
+            vec![input],
+            vec![CoinOutput::new(
+                signer,
+                Zeno::from_zeno(coin.amount.as_zeno() - 1 - burn),
+            )],
+            CoinCharges::new(fee),
+        )
+        .unwrap();
+        let commitment = program_invocation_commitment(signer, &call, &payment, chain).unwrap();
+        AuthorizedProgramInvocation {
+            signer,
+            call: call.clone(),
+            payment,
+            authorization: AccountAuthorization {
+                public_key: seed.public_key(),
+                signature: seed.sign(commitment.as_bytes()),
+            },
+        }
+    };
+    let draft = build(0);
+    let weight = program_created_state_weight_with_applications(
+        &draft,
+        chain,
+        &state.extensions,
+        &extension::SystemApplications,
+    )
+    .unwrap();
+    let size = canonical_bytes(&BlockOperation::ProgramCall(Box::new(draft)))
+        .unwrap()
+        .len() as u64;
+    let burn = ProtocolBurn::for_program_call(
+        StateTransitionWeight {
+            created_coin_utxos: 2,
+            consumed_coin_utxos: 1,
+            created_state_weight: weight,
+        },
+        size,
+    )
+    .unwrap()
+    .total()
+    .unwrap()
+    .as_zeno();
+    build(burn)
+}
+
+#[derive(Clone, Copy)]
+enum BadApplication {
+    Omit,
+    RedirectCoin,
+    SubstituteAsset,
+    FailAfterAsset,
+}
+
+impl ApplicationExecutor for BadApplication {
+    fn execute_coin(
+        &self,
+        host: &mut dyn CoinHost<CoinId = CoinShare, Error = StateError>,
+        inputs: &[CoinShare],
+        outputs: &[(Address, u64)],
+        miner: Address,
+        fee: u64,
+    ) -> Result<(), TransferError<StateError>> {
+        if matches!(self, Self::Omit) {
+            return Ok(());
+        }
+        let mut outputs = outputs.to_vec();
+        if matches!(self, Self::RedirectCoin) {
+            outputs[0].0 = Address::ZERO;
+        }
+        extension::coin_program::execute_transfer(host, inputs, &outputs, miner, fee)
+    }
+    fn execute_asset(&self, call: &AssetCall, host: &mut dyn AssetHost) -> Result<(), AssetError> {
+        if matches!(self, Self::SubstituteAsset) {
+            let AssetCall::Register(call) = call else {
+                panic!()
+            };
+            let mut replacement = call.clone();
+            replacement.name = "SUBSTITUTED".into();
+            return host.register(&replacement);
+        }
+        extension::asset_program::execute(call, host)?;
+        if matches!(self, Self::FailAfterAsset) {
+            return Err(AssetError::InvalidProgram);
+        }
+        Ok(())
+    }
+}
+
+fn register_call() -> ProgramCall {
+    let owner = address_from_public_key(&seed().public_key());
+    ProgramCall {
+        program: SystemProgramId::ASSET,
+        opcode: AssetOpcode::Register as u8,
+        payload: canonical_bytes(&Register {
+            name: "BOUNDARY".into(),
+            max_supply: Unit::from_units(100),
+            initial_mint: Unit::from_units(10),
+            mint_authority: owner,
+            nonce: 1,
+        })
+        .unwrap(),
+    }
+}
+
+#[test]
+fn extension_execution_obeys_signed_coin_effects_and_missing_apps_fail_closed() {
+    for executor in [
+        &NoApplications as &dyn ApplicationExecutor,
+        &BadApplication::Omit,
+        &BadApplication::RedirectCoin,
+    ] {
+        let mut state = funded();
+        let before = state.clone();
+        let tx = invocation(&state, extension::coin_program::transfer_call());
+        assert!(
+            state
+                .apply_program_call_with_applications(
+                    tx,
+                    Address::ZERO,
+                    ChainContext::new([7; 32]),
+                    1,
+                    executor
+                )
+                .is_err()
+        );
+        assert_eq!(state, before);
+    }
+    let mut state = funded();
+    let tx = invocation(&state, extension::coin_program::transfer_call());
+    state
+        .apply_program_call_with_applications(
+            tx,
+            Address::ZERO,
+            ChainContext::new([7; 32]),
+            1,
+            &extension::SystemApplications,
+        )
+        .unwrap();
+    state.validate_supply_invariants().unwrap();
+}
+
+#[test]
+fn asset_substitution_or_application_failure_cannot_change_state() {
+    for executor in [
+        BadApplication::SubstituteAsset,
+        BadApplication::FailAfterAsset,
+    ] {
+        let mut state = funded();
+        let before = state.clone();
+        let tx = invocation(&state, register_call());
+        assert!(
+            state
+                .apply_program_call_with_applications(
+                    tx,
+                    Address::ZERO,
+                    ChainContext::new([7; 32]),
+                    1,
+                    &executor
+                )
+                .is_err()
+        );
+        assert_eq!(state, before);
+    }
+}
+
+#[test]
+fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
+    let mut state = funded();
+    let chain = ChainContext::new([7; 32]);
+    let owner = address_from_public_key(&seed().public_key());
+    let register = invocation(&state, register_call());
+    state
+        .apply_program_call_with_applications(
+            register,
+            Address::ZERO,
+            chain,
+            1,
+            &extension::SystemApplications,
+        )
+        .unwrap();
+    let asset = *state.extensions.assets.records.keys().next().unwrap();
+    let mint = ProgramCall {
+        program: SystemProgramId::ASSET,
+        opcode: AssetOpcode::Mint as u8,
+        payload: canonical_bytes(&Mint {
+            asset,
+            nonce: 1,
+            recipient: owner,
+            amount: Unit::from_units(5),
+        })
+        .unwrap(),
+    };
+    let tx = invocation(&state, mint.clone());
+    state
+        .apply_program_call_with_applications(
+            tx,
+            Address::ZERO,
+            chain,
+            2,
+            &extension::SystemApplications,
+        )
+        .unwrap();
+    assert_eq!(
+        state.extensions.assets.records[&asset].supply,
+        Unit::from_units(15)
+    );
+    state.validate_supply_invariants().unwrap();
+    // Reusing the same mint nonce must be rejected during application preview.
+    let mut stale = mint;
+    stale.payload = canonical_bytes(&Mint {
+        asset,
+        nonce: 1,
+        recipient: owner,
+        amount: Unit::from_units(5),
+    })
+    .unwrap();
+    let before = state.clone();
+    let payment = CoinTransition::coin_with_charges(
+        owner,
+        vec![
+            state
+                .utxos
+                .coins()
+                .find(|(_, c)| c.owner == owner)
+                .unwrap()
+                .0,
+        ],
+        vec![CoinOutput::new(owner, Zeno::ONE)],
+        CoinCharges::new(Zeno::ONE),
+    )
+    .unwrap();
+    let commitment = program_invocation_commitment(owner, &stale, &payment, chain).unwrap();
+    let seed = seed();
+    let tx = AuthorizedProgramInvocation {
+        signer: owner,
+        call: stale,
+        payment,
+        authorization: AccountAuthorization {
+            public_key: seed.public_key(),
+            signature: seed.sign(commitment.as_bytes()),
+        },
+    };
+    assert!(
+        state
+            .apply_program_call_with_applications(
+                tx,
+                Address::ZERO,
+                chain,
+                3,
+                &extension::SystemApplications
+            )
+            .is_err()
+    );
+    assert_eq!(state, before);
+}
