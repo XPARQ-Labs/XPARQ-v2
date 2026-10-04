@@ -48,8 +48,8 @@ cargo --version
 ## Clone the repository
 
 ```bash
-git clone https://github.com/XPARQ-Labs/XPARQ.git
-cd XPARQ
+git clone https://github.com/XPARQ-Labs/XPARQ-v2.git
+cd XPARQ-v2
 ```
 
 ## Build
