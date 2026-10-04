@@ -10,15 +10,27 @@ use super::asset::{AssetContract, AssetError, AssetShare, Metadata, Share, Unit}
 pub use super::asset::AssetRecord;
 use crate::program::system::asset_program::type_::AssetCall;
 
+/// Kernel-owned asset state with immutable public inspection.
+///
+/// Raw authorization contexts and rollback are not application capabilities.
+///
+/// ```compile_fail
+/// use kernel::monetary::asset_state::ExecutionContext;
+/// ```
+///
+/// ```compile_fail
+/// use kernel::monetary::asset_state::AssetState;
+/// let _rollback = AssetState::rollback;
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AssetState {
-    pub records: BTreeMap<AssetContract, AssetRecord>,
-    pub shares: BTreeMap<Share, AssetShare>,
+    pub(crate) records: BTreeMap<AssetContract, AssetRecord>,
+    pub(crate) shares: BTreeMap<Share, AssetShare>,
 }
 
 /// The caller must authenticate `signer` and bind `commitment` to this call.
 #[derive(Debug, Clone, Copy)]
-pub struct ExecutionContext {
+pub(crate) struct ExecutionContext {
     pub signer: Address,
     pub commitment: [u8; HASH_SIZE],
 }
@@ -30,8 +42,30 @@ pub struct AssetJournal {
 }
 
 impl AssetState {
+    /// Read-only asset accounting records. Mutation is restricted to the kernel.
+    ///
+    /// ```compile_fail
+    /// use kernel::monetary::asset_state::AssetState;
+    /// let mut state = AssetState::default();
+    /// state.records().clear();
+    /// ```
+    pub fn records(&self) -> &BTreeMap<AssetContract, AssetRecord> {
+        &self.records
+    }
+
+    /// Read-only live shares; applications must use the bound asset host.
+    ///
+    /// ```compile_fail
+    /// use kernel::monetary::asset_state::AssetState;
+    /// let mut state = AssetState::default();
+    /// state.shares.clear();
+    /// ```
+    pub fn shares(&self) -> &BTreeMap<Share, AssetShare> {
+        &self.shares
+    }
+
     /// Apply a checked monetary instruction; application dispatch belongs to extension.
-    pub fn apply(
+    pub(crate) fn apply(
         &mut self,
         call: &AssetCall,
         context: ExecutionContext,
@@ -76,7 +110,7 @@ impl AssetState {
         Ok(journal)
     }
 
-    pub fn rollback(&mut self, journal: AssetJournal) {
+    pub(crate) fn rollback(&mut self, journal: AssetJournal) {
         for (key, previous) in journal.records {
             match previous {
                 Some(record) => {
@@ -210,6 +244,9 @@ impl AssetState {
                     .total_minted
                     .checked_add(call.amount)
                     .ok_or(AssetError::SupplyOverflow)?;
+                if total_minted > record.metadata.max_supply {
+                    return Err(AssetError::SupplyOverflow);
+                }
                 self.insert_share(
                     call.asset,
                     context.commitment,
@@ -315,6 +352,292 @@ mod tests {
         asset::AssetOutput,
         type_::{Burn, Mint, Register, Transfer},
     };
+
+    #[test]
+    fn lifetime_mint_cap_cannot_be_bypassed_by_burning_and_reminting() {
+        let owner = Address([1; crypto::ADDRESS_SIZE]);
+        let context = |byte| ExecutionContext {
+            signer: owner,
+            commitment: [byte; HASH_SIZE],
+        };
+        let mut state = AssetState::default();
+        state
+            .apply(
+                &AssetCall::Register(Register {
+                    name: "CAP".into(),
+                    max_supply: Unit::from_units(100),
+                    initial_mint: Unit::from_units(90),
+                    mint_authority: owner,
+                    nonce: 1,
+                }),
+                context(1),
+            )
+            .unwrap();
+        let asset = *state.records.keys().next().unwrap();
+        let input = *state.shares.keys().next().unwrap();
+        state
+            .apply(
+                &AssetCall::Burn(Burn {
+                    asset,
+                    inputs: vec![input],
+                    amount: Unit::from_units(80),
+                    output: Unit::from_units(10),
+                }),
+                context(2),
+            )
+            .unwrap();
+        let before = state.clone();
+        let result = state.apply(
+            &AssetCall::Mint(Mint {
+                asset,
+                nonce: 1,
+                recipient: owner,
+                amount: Unit::from_units(20),
+            }),
+            context(3),
+        );
+        assert_eq!(result, Err(AssetError::SupplyOverflow));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn transfer_collision_after_consumption_is_atomic() {
+        let owner = Address([1; crypto::ADDRESS_SIZE]);
+        let context = |byte| ExecutionContext {
+            signer: owner,
+            commitment: [byte; HASH_SIZE],
+        };
+        let mut state = AssetState::default();
+        state
+            .apply(
+                &AssetCall::Register(Register {
+                    name: "COLLISION".into(),
+                    max_supply: Unit::from_units(100),
+                    initial_mint: Unit::from_units(10),
+                    mint_authority: owner,
+                    nonce: 1,
+                }),
+                context(1),
+            )
+            .unwrap();
+        let asset = *state.records.keys().next().unwrap();
+        state
+            .apply(
+                &AssetCall::Mint(Mint {
+                    asset,
+                    nonce: 1,
+                    recipient: owner,
+                    amount: Unit::from_units(5),
+                }),
+                context(2),
+            )
+            .unwrap();
+        let before = state.clone();
+        let result = state.apply(
+            &AssetCall::Transfer(Transfer {
+                asset,
+                inputs: vec![Share::derive(asset, [1; HASH_SIZE], 0)],
+                outputs: vec![AssetOutput::new(owner, Unit::from_units(10))],
+            }),
+            context(2),
+        );
+        assert_eq!(result, Err(AssetError::ShareAlreadyExists));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn mint_amount_and_nonce_overflow_fail_without_mutation() {
+        let owner = Address([1; crypto::ADDRESS_SIZE]);
+        let context = ExecutionContext {
+            signer: owner,
+            commitment: [1; HASH_SIZE],
+        };
+        let mut state = AssetState::default();
+        state
+            .apply(
+                &AssetCall::Register(Register {
+                    name: "OVERFLOW".into(),
+                    max_supply: Unit::from_units(u128::MAX),
+                    initial_mint: Unit::from_units(u128::MAX),
+                    mint_authority: owner,
+                    nonce: 1,
+                }),
+                context,
+            )
+            .unwrap();
+        let asset = *state.records.keys().next().unwrap();
+        let before = state.clone();
+        assert_eq!(
+            state.apply(
+                &AssetCall::Mint(Mint {
+                    asset,
+                    nonce: 1,
+                    recipient: owner,
+                    amount: Unit::from_units(1),
+                }),
+                ExecutionContext {
+                    commitment: [2; HASH_SIZE],
+                    ..context
+                }
+            ),
+            Err(AssetError::SupplyOverflow)
+        );
+        assert_eq!(state, before);
+        // Synthetic exhausted counter: the next nonce must never wrap to zero.
+        state.records.get_mut(&asset).unwrap().mint_nonce = u64::MAX;
+        let before = state.clone();
+        assert_eq!(
+            state.apply(
+                &AssetCall::Mint(Mint {
+                    asset,
+                    nonce: 0,
+                    recipient: owner,
+                    amount: Unit::from_units(1),
+                }),
+                ExecutionContext {
+                    commitment: [2; HASH_SIZE],
+                    ..context
+                }
+            ),
+            Err(AssetError::InvalidMintNonce)
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn generated_asset_lifecycles_preserve_balances_supply_and_exact_rollback() {
+        for seed in 1..=16u64 {
+            let owners = [
+                Address([1; crypto::ADDRESS_SIZE]),
+                Address([2; crypto::ADDRESS_SIZE]),
+            ];
+            let mut state = AssetState::default();
+            let initial = state.clone();
+            let registration = state
+                .apply(
+                    &AssetCall::Register(Register {
+                        name: "MODEL".into(),
+                        max_supply: Unit::from_units(10_000),
+                        initial_mint: Unit::from_units(1_000),
+                        mint_authority: owners[0],
+                        nonce: seed,
+                    }),
+                    ExecutionContext {
+                        signer: owners[0],
+                        commitment: [0; HASH_SIZE],
+                    },
+                )
+                .unwrap();
+            let asset = *state.records.keys().next().unwrap();
+            let mut balances = [1_000u64, 0];
+            let mut minted = 1_000u64;
+            let mut burned = 0u64;
+            let mut nonce = 0u64;
+            let mut random = seed;
+            let mut journals = vec![(initial, registration)];
+            for step in 1..=64u64 {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                let selected = (random & 1) as usize;
+                let mut commitment = [0; HASH_SIZE];
+                commitment[..8].copy_from_slice(&seed.to_le_bytes());
+                commitment[8..16].copy_from_slice(&step.to_le_bytes());
+                let inputs = state
+                    .shares
+                    .iter()
+                    .filter(|(_, share)| share.owner == owners[selected])
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>();
+                let before = state.clone();
+                let (call, signer) = if random % 3 == 0 || balances[selected] == 0 {
+                    let amount = random % 20 + 1;
+                    nonce += 1;
+                    minted += amount;
+                    balances[selected] += amount;
+                    (
+                        AssetCall::Mint(Mint {
+                            asset,
+                            nonce,
+                            recipient: owners[selected],
+                            amount: Unit::from_units(amount.into()),
+                        }),
+                        owners[0],
+                    )
+                } else if random % 3 == 1 {
+                    let amount = random % balances[selected] + 1;
+                    let change = balances[selected] - amount;
+                    let mut outputs = vec![AssetOutput::new(
+                        owners[1 - selected],
+                        Unit::from_units(amount.into()),
+                    )];
+                    if change > 0 {
+                        outputs.push(AssetOutput::new(
+                            owners[selected],
+                            Unit::from_units(change.into()),
+                        ));
+                    }
+                    balances[selected] = change;
+                    balances[1 - selected] += amount;
+                    (
+                        AssetCall::Transfer(Transfer {
+                            asset,
+                            inputs,
+                            outputs,
+                        }),
+                        owners[selected],
+                    )
+                } else {
+                    let amount = random % balances[selected] + 1;
+                    balances[selected] -= amount;
+                    burned += amount;
+                    (
+                        AssetCall::Burn(Burn {
+                            asset,
+                            inputs,
+                            amount: Unit::from_units(amount.into()),
+                            output: Unit::from_units(balances[selected].into()),
+                        }),
+                        owners[selected],
+                    )
+                };
+                let journal = state
+                    .apply(&call, ExecutionContext { signer, commitment })
+                    .unwrap();
+                for (index, owner) in owners.iter().enumerate() {
+                    let actual: u128 = state
+                        .shares
+                        .values()
+                        .filter(|share| share.owner == *owner)
+                        .map(|share| share.amount.as_units())
+                        .sum();
+                    assert_eq!(actual, u128::from(balances[index]));
+                }
+                assert_eq!(
+                    state.records[&asset].supply.as_units(),
+                    u128::from(minted - burned)
+                );
+                assert_eq!(
+                    state.records[&asset].total_minted.as_units(),
+                    u128::from(minted)
+                );
+                assert_eq!(
+                    state.records[&asset].total_burned.as_units(),
+                    u128::from(burned)
+                );
+                let mut ledger = crate::ledger::LedgerState::default();
+                ledger.extensions.assets = state.clone();
+                ledger.validate_supply_invariants().unwrap();
+                journals.push((before, journal));
+            }
+            for (before, journal) in journals.into_iter().rev() {
+                let encoded = borsh::to_vec(&journal).unwrap();
+                state.rollback(AssetJournal::try_from_slice(&encoded).unwrap());
+                assert_eq!(state, before);
+            }
+            assert_eq!(state, AssetState::default());
+        }
+    }
 
     #[test]
     fn lifecycle_authorization_conservation_and_rollback() {

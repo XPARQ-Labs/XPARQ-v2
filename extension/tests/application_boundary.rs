@@ -109,6 +109,7 @@ enum BadApplication {
     RedirectCoin,
     SubstituteAsset,
     FailAfterAsset,
+    DoubleAsset,
 }
 
 impl ApplicationExecutor for BadApplication {
@@ -139,6 +140,9 @@ impl ApplicationExecutor for BadApplication {
             return host.register(&replacement);
         }
         extension::asset_program::execute(call, host)?;
+        if matches!(self, Self::DoubleAsset) {
+            extension::asset_program::execute(call, host)?;
+        }
         if matches!(self, Self::FailAfterAsset) {
             return Err(AssetError::InvalidProgram);
         }
@@ -204,6 +208,7 @@ fn asset_substitution_or_application_failure_cannot_change_state() {
     for executor in [
         BadApplication::SubstituteAsset,
         BadApplication::FailAfterAsset,
+        BadApplication::DoubleAsset,
     ] {
         let mut state = funded();
         let before = state.clone();
@@ -224,6 +229,104 @@ fn asset_substitution_or_application_failure_cannot_change_state() {
 }
 
 #[test]
+fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
+    let initial = funded();
+    let tx = invocation(&initial, register_call());
+    let chain = ChainContext::new([7; 32]);
+    let mut variants = Vec::new();
+    let mut changed = tx.clone();
+    changed.payment.outputs[0].output = Address::ZERO;
+    variants.push((changed, chain));
+    let mut changed = tx.clone();
+    changed.payment.inputs.push(changed.payment.inputs[0]);
+    variants.push((changed, chain));
+    let mut changed = tx.clone();
+    changed.payment.inputs[0] = CoinShare::from_bytes([9; 16]);
+    variants.push((changed, chain));
+    let mut changed = tx.clone();
+    changed.payment.outputs[0].amount = Zeno::ZERO;
+    variants.push((changed, chain));
+    let mut changed = tx.clone();
+    changed.payment.charges.miner_fee = Zeno::from_zeno(u64::MAX);
+    variants.push((changed, chain));
+    let mut changed = tx.clone();
+    let mut register: Register = canonical_decode(&changed.call.payload).unwrap();
+    register.initial_mint = Unit::from_units(20);
+    changed.call.payload = canonical_bytes(&register).unwrap();
+    variants.push((changed, chain));
+    let mut changed = tx.clone();
+    changed.authorization.signature = seed().sign(&[0; 32]);
+    variants.push((changed, chain));
+    variants.push((tx.clone(), ChainContext::new([8; 32])));
+
+    // A valid attacker signature still cannot spend an input owned by another key.
+    let attacker = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([22; 32]));
+    let mut changed = tx;
+    changed.signer = address_from_public_key(&attacker.public_key());
+    changed.payment.signer = changed.signer;
+    let commitment =
+        program_invocation_commitment(changed.signer, &changed.call, &changed.payment, chain)
+            .unwrap();
+    changed.authorization = AccountAuthorization {
+        public_key: attacker.public_key(),
+        signature: attacker.sign(commitment.as_bytes()),
+    };
+    variants.push((changed, chain));
+
+    for (index, (changed, context)) in variants.into_iter().enumerate() {
+        let mut state = initial.clone();
+        assert!(
+            state
+                .apply_program_call_with_applications(
+                    changed,
+                    Address::ZERO,
+                    context,
+                    1,
+                    &extension::SystemApplications,
+                )
+                .is_err(),
+            "tamper case {index} was accepted"
+        );
+        assert_eq!(state, initial, "tamper case {index} mutated state");
+        state.audit_coin_supply().unwrap();
+        state.validate_supply_invariants().unwrap();
+    }
+}
+
+#[test]
+fn signed_asset_replay_is_rejected_without_changing_committed_state() {
+    let mut state = funded();
+    let tx = invocation(&state, register_call());
+    let chain = ChainContext::new([7; 32]);
+    state
+        .apply_program_call_with_applications(
+            tx.clone(),
+            Address::ZERO,
+            chain,
+            1,
+            &extension::SystemApplications,
+        )
+        .unwrap();
+    state.audit_coin_supply().unwrap();
+    state.validate_supply_invariants().unwrap();
+    let committed = state.clone();
+    assert!(
+        state
+            .apply_program_call_with_applications(
+                tx,
+                Address::ZERO,
+                chain,
+                2,
+                &extension::SystemApplications,
+            )
+            .is_err()
+    );
+    assert_eq!(state, committed);
+    state.audit_coin_supply().unwrap();
+    state.validate_supply_invariants().unwrap();
+}
+
+#[test]
 fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
     let mut state = funded();
     let chain = ChainContext::new([7; 32]);
@@ -238,7 +341,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
             &extension::SystemApplications,
         )
         .unwrap();
-    let asset = *state.extensions.assets.records.keys().next().unwrap();
+    let asset = *state.extensions.assets.records().keys().next().unwrap();
     let mint = ProgramCall {
         program: SystemProgramId::ASSET,
         opcode: AssetOpcode::Mint as u8,
@@ -261,7 +364,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         )
         .unwrap();
     assert_eq!(
-        state.extensions.assets.records[&asset].supply,
+        state.extensions.assets.records()[&asset].supply,
         Unit::from_units(15)
     );
     state.validate_supply_invariants().unwrap();

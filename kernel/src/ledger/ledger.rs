@@ -562,7 +562,7 @@ impl LedgerState {
     pub fn validate_supply_invariants(&self) -> Result<(), LedgerError> {
         let coin_total = self.utxos.total_value();
 
-        if self.coin.supply() != Some(coin_total) {
+        if self.coin.supply() != Some(coin_total) || self.utxos.is_empty() != coin_total.is_zero() {
             return Err(LedgerError::CoinSupplyMismatch);
         }
 
@@ -571,6 +571,9 @@ impl LedgerState {
         let mut totals = BTreeMap::new();
 
         for share in assets.shares.values() {
+            if share.amount.is_zero() {
+                return Err(LedgerError::InvalidAssetState);
+            }
             if !assets.records.contains_key(&share.asset) {
                 return Err(LedgerError::UnknownAssetShare);
             }
@@ -585,6 +588,10 @@ impl LedgerState {
         }
 
         for (asset, record) in &assets.records {
+            record
+                .metadata
+                .validate()
+                .map_err(|_| LedgerError::InvalidAssetState)?;
             if record.total_minted > record.metadata.max_supply
                 || record.total_minted.checked_sub(record.total_burned) != Some(record.supply)
                 || totals
@@ -609,6 +616,9 @@ impl LedgerState {
             .utxos
             .coins()
             .try_fold(Zeno::ZERO, |total, (_, coin)| {
+                if coin.amount.is_zero() {
+                    return Err(LedgerError::InvalidCoinState);
+                }
                 total
                     .checked_add(coin.amount)
                     .ok_or(LedgerError::SupplyOverflow)
@@ -677,6 +687,10 @@ pub enum LedgerError {
 
     CoinSupplyMismatch,
 
+    InvalidCoinState,
+
+    InvalidAssetState,
+
     BlockAccountingMismatch,
 
     AssetSupplyMismatch,
@@ -732,6 +746,12 @@ impl fmt::Display for LedgerError {
 
             Self::CoinSupplyMismatch => {
                 formatter.write_str("coin UTXO total does not match supply")
+            }
+
+            Self::InvalidCoinState => formatter.write_str("coin state contains a zero-value UTXO"),
+
+            Self::InvalidAssetState => {
+                formatter.write_str("asset state contains invalid metadata or a zero-value share")
             }
 
             Self::BlockAccountingMismatch => {

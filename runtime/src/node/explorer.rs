@@ -564,7 +564,7 @@ fn program_shares(
     asset: extension::asset_program::asset::AssetContract,
     address: Address,
 ) -> Vec<serde_json::Value> {
-    ledger.state().extensions.assets.shares.iter()
+    ledger.state().extensions.assets.shares().iter()
         .filter(|(_,s)|s.asset==asset && s.owner==address)
         .map(|(id,s)|serde_json::json!({"share_id":id.to_string(),"amount":s.amount.to_string(),"owner":asset_owner_response(address)})).collect()
 }
@@ -575,7 +575,7 @@ pub(super) fn program_account_assets(
 ) -> Result<Vec<serde_json::Value>, String> {
     let state = &ledger.state().extensions.assets;
     let mut result = Vec::new();
-    for (asset, record) in &state.records {
+    for (asset, record) in state.records() {
         let shares = program_shares(ledger, *asset, address);
         if shares.is_empty()
             && record.metadata.creator != address
@@ -603,7 +603,7 @@ pub(super) fn program_asset_response(
         .state()
         .extensions
         .assets
-        .records
+        .records()
         .get(&asset)
         .ok_or("program asset was not found")?;
     if parts.len() == 1 {
@@ -618,7 +618,7 @@ pub(super) fn program_asset_response(
             .state()
             .extensions
             .assets
-            .shares
+            .shares()
             .values()
             .filter(|s| s.asset == asset && s.owner == address)
             .try_fold(extension::asset_program::asset::Unit::ZERO, |sum, s| {

@@ -429,12 +429,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
 #[test]
 fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
     use extension::{
-        asset_program::{
-            asset::Unit,
-            opcode::AssetOpcode,
-            state::{AssetState, ExecutionContext},
-            type_::{AssetCall, Register},
-        },
+        asset_program::{asset::Unit, opcode::AssetOpcode, type_::Register},
         script::call::{ProgramCall, SystemProgramId},
     };
     use kernel::{
@@ -477,19 +472,8 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
         opcode: AssetOpcode::Register as u8,
         payload: borsh::to_vec(&register).unwrap(),
     };
-    let mut preview = AssetState::default();
-    let before = canonical_bytes(&preview).unwrap().len();
-    preview
-        .apply(
-            &AssetCall::Register(register),
-            ExecutionContext {
-                signer,
-                commitment: [1; 32],
-            },
-        )
-        .unwrap();
-    let growth = (canonical_bytes(&preview).unwrap().len() - before) as u64;
     let chain = kernel::genesis::chain_context().unwrap();
+    let mut growth = None;
     let mut size = 0;
     let transaction = loop {
         let fee = (size * 8).max(1);
@@ -497,7 +481,7 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
             StateTransitionWeight {
                 created_coin_utxos: 2,
                 consumed_coin_utxos: 1,
-                created_state_weight: growth,
+                created_state_weight: growth.unwrap_or(0),
             },
             size,
         )
@@ -526,7 +510,18 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
             },
         }));
         let actual = canonical_bytes(&tx).unwrap().len() as u64;
-        if actual == size {
+        if growth.is_none() {
+            let AuthorizedProgramEnvelope::Program(invocation) = &tx;
+            growth = Some(
+                kernel::program::program_created_state_weight_with_applications(
+                    invocation,
+                    chain,
+                    &kernel::program::system::script::state::ExtensionState::default(),
+                    &extension::SystemApplications,
+                )
+                .unwrap(),
+            );
+        } else if actual == size {
             break tx;
         }
         size = actual;

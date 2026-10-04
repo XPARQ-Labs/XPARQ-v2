@@ -11,6 +11,11 @@ conservation and protocol burn. Restricted hosts bind extension execution to
 signed effects. Checked kernel monetary primitives enforce asset authorization,
 mint nonce, supply and unique share IDs. Block execution, rollback and reorg use
 staged state. State-root and supply checks run before canonical changes commit.
+Raw asset accounting maps, execution contexts, apply and rollback are restricted
+to the kernel crate; public accessors expose immutable state. Zero-value monetary
+objects and invalid asset metadata are rejected, and mint primitives enforce the
+existing lifetime issuance cap. See [monetary hardening](MONETARY_HARDENING.md)
+for mutation boundaries and regression coverage.
 Authorization binds signed data to the chain; deployed bytecode is validated
 before registry insertion. These controls must remain covered when paths change.
 
