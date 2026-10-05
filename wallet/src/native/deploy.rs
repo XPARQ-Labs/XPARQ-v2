@@ -22,7 +22,7 @@ pub(super) fn deploy_program(args: &[String]) -> Result<(), String> {
     let deploy = DeployProgram {
         owner: wallet.address(),
         nonce,
-        code,
+        code: code.into(),
     };
     deploy
         .validate_structure()
@@ -166,7 +166,7 @@ mod tests {
         let program = DeployProgram {
             owner: wallet.address,
             nonce: 1,
-            code,
+            code: code.into(),
         };
         let payment = CoinTransition::coin_with_charges(
             wallet.address,

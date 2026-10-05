@@ -175,7 +175,7 @@ pub fn account_wallet_from_bip39_mnemonic(
 
     let mut tag = Vec::from(b"XPARQ_WALLET_SIGNATURE_ACCOUNT".as_slice());
 
-    tag.push(account as u8);
+    tag.push(account.id());
 
     let seed = tagged_wallet_hash(&tag, &entropy);
 
@@ -190,7 +190,7 @@ pub fn account_wallet_from_bip39_mnemonic(
     Ok(AccountWallet {
         mnemonic: None,
 
-        address: address_from_public_key(&public_key),
+        address: address_from_public_key(&public_key).map_err(|error| error.to_string())?,
 
         public_key,
 

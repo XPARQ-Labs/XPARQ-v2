@@ -134,14 +134,14 @@ fn expected_difficulty(chain: &Chain, height: Height) -> Result<u32, ConsensusEr
     }
 
     let parent = chain
-        .block(&Height(height.0 - 1))
+        .header(&Height(height.0 - 1))
         .ok_or(ConsensusError::InvalidPreviousHash)?;
 
-    expected_difficulty_for_height(height.0, parent.target_bits(), |height| {
+    expected_difficulty_for_height(height.0, parent.target_bits, |height| {
         chain
-            .block(&Height(height))
+            .header(&Height(height))
             .ok_or(ConsensusError::InvalidPreviousHash)?
-            .block_weight()
+            .block_weight
             .try_into()
             .map_err(|_| ConsensusError::InvalidDifficulty)
     })?

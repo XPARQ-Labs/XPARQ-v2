@@ -105,7 +105,7 @@ impl AccountAuthorization {
             return false;
         }
 
-        if address_from_public_key(&self.public_key) != sender {
+        if address_from_public_key(&self.public_key) != Ok(sender) {
             return false;
         }
 
@@ -250,9 +250,24 @@ mod program_transaction_tests {
     }
 
     #[test]
+    fn malformed_in_memory_public_key_cannot_authorize_a_commitment() {
+        let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([14; 32]));
+        let public_key = seed.public_key();
+        let sender = address_from_public_key(&public_key).unwrap();
+        let commitment = AuthorizationCommitment::from_bytes([8; HASH_SIZE]);
+        let mut authorization = AccountAuthorization {
+            public_key,
+            signature: seed.sign(commitment.as_bytes()),
+        };
+        assert!(authorization.verify_commitment(sender, &commitment, 0));
+        authorization.public_key.bytes.pop();
+        assert!(!authorization.verify_commitment(sender, &commitment, 0));
+    }
+
+    #[test]
     fn program_envelope_binds_payment_and_requires_state_view() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([14; 32]));
-        let signer = address_from_public_key(&seed.public_key());
+        let signer = address_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([8; HASH_SIZE]);
         let call = ProgramCall {
             program: SystemProgramId::ASSET,

@@ -166,7 +166,7 @@
         },
         "responses": {
           "200": {
-            "description": "created_state_weight in bytes and canonical tip_hash; payment burn is not checked during quote"
+            "description": "created_state_weight in bytes, vm_fuel (one zeno burn per unit; zero for non-VM calls), and canonical tip_hash; payment burn is not checked during quote"
           },
           "400": {
             "description": "Invalid Program quote request"

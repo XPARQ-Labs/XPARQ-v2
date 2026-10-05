@@ -90,13 +90,13 @@ mod tests {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x41; 32]));
 
         let public_key = seed.public_key();
-        let owner = address_from_public_key(&public_key);
+        let owner = address_from_public_key(&public_key).unwrap();
 
         BlockOperation::DeployProgram(Box::new(AuthorizedDeployProgram {
             deploy: DeployProgram {
                 owner,
                 nonce: 1,
-                code,
+                code: code.into(),
             },
             payment: CoinTransition::coin(
                 owner,

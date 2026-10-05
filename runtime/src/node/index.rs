@@ -113,27 +113,27 @@ fn ensure_persistent_indexes(path: &Path, ledger: &Ledger) -> Result<(), String>
         return Ok(());
     }
 
-    let blocks = ledger
-        .chain
-        .blocks()
-        .map(|block| {
+    let blocks = || {
+        ledger.chain.headers().map(|(height, _)| {
+            let block = super::state::canonical_block(path, ledger, *height)?;
             Ok(crate::storage::CanonicalIndexBlock {
                 height: block.height().0,
 
                 hash: block.hash().map_err(|error| error.to_string())?.0,
 
-                bytes: kernel::blockchain::block_bytes(block).map_err(|error| error.to_string())?,
+                bytes: kernel::blockchain::block_bytes(&block)
+                    .map_err(|error| error.to_string())?,
 
-                transactions: block_program_transactions(block)
+                transactions: block_program_transactions(&block)
                     .map(|transaction| transaction.id().map_err(|error| error.to_string()))
                     .collect::<Result<Vec<_>, String>>()?,
 
-                activities: stored_address_activities(block)?,
+                activities: stored_address_activities(&block)?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+    };
 
-    crate::storage::rebuild_canonical_indexes(path, &blocks)
+    crate::storage::rebuild_canonical_indexes_stream(path, blocks)
 }
 
 pub(super) fn transaction_location(

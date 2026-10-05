@@ -1,7 +1,4 @@
 use core::num::Wrapping;
-use core::{f32, f64};
-use core::{i128, i16, i32, i64, i8, isize};
-use core::{u128, u16, u32, u64, u8, usize};
 
 /// Numbers which have upper and lower bounds
 pub trait Bounded {
@@ -117,8 +114,8 @@ fn wrapping_bounded() {
     macro_rules! test_wrapping_bounded {
         ($($t:ty)+) => {
             $(
-                assert_eq!(<Wrapping<$t> as Bounded>::min_value().0, <$t>::min_value());
-                assert_eq!(<Wrapping<$t> as Bounded>::max_value().0, <$t>::max_value());
+                assert_eq!(<Wrapping<$t> as Bounded>::min_value().0, <$t>::MIN);
+                assert_eq!(<Wrapping<$t> as Bounded>::max_value().0, <$t>::MAX);
             )+
         };
     }
@@ -131,8 +128,8 @@ fn wrapping_bounded_i128() {
     macro_rules! test_wrapping_bounded {
         ($($t:ty)+) => {
             $(
-                assert_eq!(<Wrapping<$t> as Bounded>::min_value().0, <$t>::min_value());
-                assert_eq!(<Wrapping<$t> as Bounded>::max_value().0, <$t>::max_value());
+                assert_eq!(<Wrapping<$t> as Bounded>::min_value().0, <$t>::MIN);
+                assert_eq!(<Wrapping<$t> as Bounded>::max_value().0, <$t>::MAX);
             )+
         };
     }

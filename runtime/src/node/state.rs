@@ -116,8 +116,8 @@ pub(super) fn build_header_state_checkpoints(
     let mut cumulative_work = kernel::consensus::Work::ZERO;
     let mut cumulative_weight = 0_u64;
 
-    for block in ledger.chain.blocks() {
-        let height = block.height();
+    for (height, block) in ledger.chain.headers() {
+        let height = *height;
 
         let hash = block.hash().map_err(|error| error.to_string())?.0;
 
@@ -136,17 +136,16 @@ pub(super) fn build_header_state_checkpoints(
             continue;
         }
 
-        let block_work = kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+        let block_work = kernel::consensus::block_work(block.target_bits).ok_or_else(|| {
             format!(
                 "invalid target bits {:08x} at height {}",
-                block.target_bits(),
-                height.0,
+                block.target_bits, height.0,
             )
         })?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 
-        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight()));
+        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight));
 
         if height.0.is_multiple_of(HEADER_STATE_CHECKPOINT_INTERVAL) {
             checkpoints.push(HeaderStateCheckpoint {
@@ -192,7 +191,7 @@ fn updated_header_state_checkpoints(
         checkpoint.height <= tip_height
             && ledger
                 .chain
-                .block(&checkpoint.height)
+                .header(&checkpoint.height)
                 .and_then(|block| block.hash().ok())
                 .is_some_and(|hash| hash.0 == checkpoint.hash)
     });
@@ -214,20 +213,19 @@ fn updated_header_state_checkpoints(
 
         let block = ledger
             .chain
-            .block(&height)
+            .header(&height)
             .ok_or("canonical block is missing while updating checkpoints")?;
 
-        let block_work = kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+        let block_work = kernel::consensus::block_work(block.target_bits).ok_or_else(|| {
             format!(
                 "invalid target bits {:08x} at height {}",
-                block.target_bits(),
-                height.0,
+                block.target_bits, height.0,
             )
         })?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 
-        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight()));
+        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight));
 
         if height.0.is_multiple_of(HEADER_STATE_CHECKPOINT_INTERVAL) {
             checkpoints.push(HeaderStateCheckpoint {
@@ -291,18 +289,73 @@ pub(super) fn cached_canonical_block_bytes(
         return Ok(None);
     };
 
-    let block = ledger
-        .chain
-        .block(&height)
-        .ok_or("indexed canonical block is missing")?;
-
-    let actual_hash = block.hash().map_err(|error| error.to_string())?.0;
-
-    if actual_hash != hash {
+    let block = canonical_block(path, &ledger, height)?;
+    if block.hash().map_err(|error| error.to_string())?.0 != hash {
         return Err("block index does not match canonical chain".into());
     }
+    Ok(Some(
+        block_bytes(&block).map_err(|error| error.to_string())?,
+    ))
+}
 
-    Ok(Some(block_bytes(block).map_err(|error| error.to_string())?))
+// Logical canonical bytes, not a whole-process RSS limit. Headers, state and
+// journal retention is managed separately; genesis/tip may exceed a smaller budget.
+pub(super) const BODY_CACHE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const BODY_CACHE_BLOCKS: usize = 128;
+
+pub(super) fn trim_body_cache(ledger: &mut Ledger) -> Result<(), String> {
+    ledger
+        .chain
+        .retain_recent_bodies(BODY_CACHE_BYTES, BODY_CACHE_BLOCKS)
+        .map_err(|error| format!("trim resident body cache: {error}"))
+}
+
+/// A missing/corrupt local body is a storage error, never evidence of invalid consensus.
+/// The pinned ledger header guards reads across concurrent canonical replacements.
+pub(super) fn canonical_block(
+    path: &Path,
+    ledger: &Ledger,
+    height: Height,
+) -> Result<Block, String> {
+    let header = ledger
+        .chain
+        .header(&height)
+        .ok_or("block was not found in this chain")?;
+    if let Some(block) = ledger.chain.block(&height) {
+        if &block.header != header {
+            return Err("resident body does not match pinned header".into());
+        }
+        return Ok(block.clone());
+    }
+    let bytes = crate::storage::read_block_at_height(path, height.0)?
+        .ok_or("local canonical body is missing; recovery is required")?;
+    decode_pinned_local_body(height, header, &bytes)
+}
+
+/// Only for a body whose header belongs to this node's already validated chain.
+/// Authenticate local bytes without repeating VM/operation validity checks on each
+/// read. Untrusted peer blocks and full replay still use decode_block/apply_block.
+pub(super) fn decode_pinned_local_body(
+    height: Height,
+    header: &kernel::block::Header,
+    bytes: &[u8],
+) -> Result<Block, String> {
+    if bytes.is_empty() || bytes.len() > kernel::block::MAX_BLOCK_SIZE {
+        return Err("local body size is outside allowed range".into());
+    }
+    let block: Block =
+        canonical_decode(bytes).map_err(|error| format!("local body decode failed: {error}"))?;
+    if block.height() != height || &block.header != header {
+        return Err("local body does not match pinned canonical header; retry or recover".into());
+    }
+    if block
+        .calculate_merkle_root()
+        .map_err(|error| format!("local body Merkle calculation failed: {error}"))?
+        != header.merkle_root
+    {
+        return Err("local body Merkle commitment failed; recovery is required".into());
+    }
+    Ok(block)
 }
 
 pub(super) fn cached_handshake(path: &Path) -> Result<Handshake, String> {
@@ -325,12 +378,14 @@ pub(super) fn load_or_create_node_id(database: &Path) -> Result<[u8; 32], String
         .map_err(|_| "stored node ID has invalid length".into())
 }
 
-pub(super) fn update_ledger_cache(path: &Path, ledger: Ledger) -> Result<Arc<Ledger>, String> {
+pub(super) fn update_ledger_cache(path: &Path, mut ledger: Ledger) -> Result<Arc<Ledger>, String> {
     let (checkpoints, cumulative_work, cumulative_weight) =
         updated_header_state_checkpoints(path, &ledger)?;
 
     let checkpoints = Arc::new(checkpoints);
 
+    super::journal::prune_journals(path, &mut ledger)?;
+    trim_body_cache(&mut ledger)?;
     let ledger = Arc::new(ledger);
 
     let mut cache = ledger_cache()
@@ -355,53 +410,52 @@ pub(super) fn update_ledger_cache(path: &Path, ledger: Ledger) -> Result<Arc<Led
 }
 
 pub(super) fn load_existing(path: &Path) -> Result<Ledger, String> {
-    let blocks = read_blocks(path)?;
-    let (genesis, rest) = blocks
-        .split_first()
-        .ok_or("database has no genesis block")?;
-    match crate::snapshot::load(path, &blocks) {
-        Ok(Some((ledger, next))) => match replay_stored_blocks(path, ledger, &blocks[next..]) {
+    match crate::snapshot::load_streamed(path, BODY_CACHE_BYTES, BODY_CACHE_BLOCKS) {
+        Ok(Some((ledger, next))) => match replay_body_stream(path, ledger, next) {
             Ok(ledger) => return Ok(ledger),
             Err(error) => eprintln!("node: snapshot replay failed, using full replay: {error}"),
         },
         Ok(None) => {}
         Err(error) => eprintln!("node: snapshot ignored, using full replay: {error}"),
     }
+    let mut reader = crate::storage::CanonicalBodyReader::new(path)?;
+    let genesis = decode_block(&reader.next().ok_or("database has no genesis block")??)
+        .map_err(|error| format!("decode stored genesis: {error}"))?;
     let mut ledger = Ledger::new().with_applications(extension::SystemApplications);
-    kernel::consensus::apply_genesis(&mut ledger, genesis.clone(), EXPECTED_GENESIS_HASH)
+    kernel::consensus::apply_genesis(&mut ledger, genesis, EXPECTED_GENESIS_HASH)
         .map_err(|error| format!("invalid stored genesis: {error}"))?;
-    replay_stored_blocks(path, ledger, rest)
+    replay_body_reader(path, ledger, reader)
 }
 
-pub(super) fn replay_stored_blocks(
+fn replay_body_stream(path: &Path, ledger: Ledger, next: u64) -> Result<Ledger, String> {
+    let mut reader = crate::storage::CanonicalBodyReader::new(path)?;
+    // Skip encoded entries without retaining or decoding the snapshot prefix.
+    for _ in 0..next {
+        reader
+            .next()
+            .ok_or("snapshot prefix missing from body log")??;
+    }
+    replay_body_reader(path, ledger, reader)
+}
+
+fn replay_body_reader(
     path: &Path,
     mut ledger: Ledger,
-    blocks: &[Block],
+    reader: crate::storage::CanonicalBodyReader,
 ) -> Result<Ledger, String> {
-    for block in blocks {
-        apply_block(&mut ledger, block.clone()).map_err(|error| {
-            format!(
-                "invalid stored block at height {}: {error}",
-                block.height().0
-            )
-        })?;
+    for bytes in reader {
+        let block =
+            decode_block(&bytes?).map_err(|error| format!("decode stored body: {error}"))?;
+        apply_block(&mut ledger, block)
+            .map_err(|error| format!("validate stored body: {error}"))?;
+        super::journal::prune_journals(path, &mut ledger)?;
+        trim_body_cache(&mut ledger)?;
         if let Err(error) = crate::snapshot::write_if_due(path, &ledger) {
             eprintln!("node: snapshot write failed: {error}");
         }
     }
+    super::journal::prune_journals(path, &mut ledger)?;
     Ok(ledger)
-}
-
-pub(super) fn read_blocks(path: &Path) -> Result<Vec<Block>, String> {
-    crate::storage::read_blocks(path)?
-        .into_iter()
-        .map(|bytes| {
-            if bytes.is_empty() || bytes.len() > MAX_STORED_BLOCK_SIZE {
-                return Err("stored block size is outside allowed range".into());
-            }
-            decode_block(&bytes).map_err(|error| format!("decode stored block: {error}"))
-        })
-        .collect()
 }
 
 pub(super) fn print_status(ledger: &Ledger, database: &Path) {

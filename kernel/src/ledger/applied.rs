@@ -37,7 +37,7 @@ mod vm_state_call_tests {
     #[test]
     fn vm_state_call_updates_root_and_rolls_back_with_coin_payment() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x53; 32]));
-        let owner = address_from_public_key(&seed.public_key());
+        let owner = address_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([0x91; crypto::HASH_SIZE]);
         let mut state = LedgerState::default();
         let input = CoinShare::from_bytes([0x23; crypto::HASH16_SIZE]);
@@ -58,7 +58,7 @@ mod vm_state_call_tests {
             DeployProgram {
                 owner,
                 nonce: 1,
-                code,
+                code: code.into(),
             },
             Height(1),
         )

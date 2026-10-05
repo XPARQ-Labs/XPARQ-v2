@@ -66,7 +66,11 @@ Snapshots contain canonical state and rollback journals, not application executo
 | GET /program/asset/{asset}/balance/{address} | Balance and owned shares |
 
 Program quote verifies authorization but does not validate exact payment burn or
-funding availability. It returns `created_state_weight` and canonical `tip_hash`.
+funding availability. It returns `created_state_weight`, `vm_fuel` (zero for non-VM calls), and
+canonical `tip_hash`. VM quotes execute read-only against the current registry;
+they reject missing programs, invalid code, overflow, and exhausted fuel. VM
+payments must include one zeno of burn per fuel unit in addition to existing
+state and archival burn.
 Deployment quote returns `program_id`, `required_protocol_burn`,
 `authorization_commitment`, next-block `height` and `tip_hash`. Quotes can become
 stale; submission revalidates against current mempool state. A state-growth quote

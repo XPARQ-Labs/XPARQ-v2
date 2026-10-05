@@ -391,10 +391,10 @@ pub(super) fn serve_header_requests(
         let (ancestor_height, ancestor_hash) = loop {
             let block = ledger
                 .chain
-                .block(&height)
+                .header(&height)
                 .ok_or("canonical block is missing")?;
 
-            let hash = block.header.hash().map_err(|error| error.to_string())?.0;
+            let hash = block.hash().map_err(|error| error.to_string())?.0;
 
             if locator.contains(&hash) {
                 break (height, hash);
@@ -420,12 +420,12 @@ pub(super) fn serve_header_requests(
 
             let block = ledger
                 .chain
-                .block(&height)
+                .header(&height)
                 .ok_or("canonical block is missing")?;
 
             extension.push(kernel::consensus::HeaderAtHeight::new(
                 height,
-                block.header.clone(),
+                block.clone(),
             ));
 
             next_height = value.checked_add(1);

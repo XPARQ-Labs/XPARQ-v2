@@ -405,3 +405,97 @@ fn xpq_program_wallet_cli_spend_and_consolidation() {
     drop(node);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires node binary; cargo build -p node -p wallet --bins then run explicitly"]
+fn counter_deploy_and_call_cli_survive_restart() {
+    let node_binary = Path::new(env!("CARGO_BIN_EXE_wallet")).with_file_name(if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    });
+    assert!(node_binary.exists(), "build the node binary first");
+    let root = std::env::temp_dir().join(format!(
+        "xparq-counter-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("data");
+    let file = root.join("wallet.json");
+    let words = wallet::encode_bip39_mnemonic(&[71; 16]).unwrap();
+    let mut owner =
+        wallet::account_wallet_from_bip39_mnemonic(&words, kernel::crypto::Signature::MlDsa44)
+            .unwrap();
+    owner.mnemonic = Some(words);
+    fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
+    let address = kernel::crypto::address_to_string(&owner.address);
+    let code = root.join("counter.xpvm");
+    fs::write(&code, include_bytes!("../../examples/counter/counter.xpvm")).unwrap();
+    mine(&node_binary, &db, &address);
+    let rpc = free();
+    let p2p = free();
+    let mut node = start(&node_binary, &db, &rpc, &p2p);
+    let output = cli(
+        &file,
+        &rpc,
+        "program-deploy",
+        &["--code", code.to_str().unwrap(), "--nonce", "1"],
+    );
+    let program_id = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Program ID: "))
+        .unwrap()
+        .to_string();
+    assert!(output.contains("Operation ID:"));
+    drop(node);
+    mine(&node_binary, &db, &address);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    let offline = cli(
+        &file,
+        &rpc,
+        "program-call",
+        &["--program-id", &program_id, "--offline"],
+    );
+    assert!(offline.contains("Transaction Hex:"));
+    assert!(!offline.contains("Tx Hash:"));
+    for _ in 0..2 {
+        let output = cli(&file, &rpc, "program-call", &["--program-id", &program_id]);
+        let hash = output
+            .lines()
+            .find_map(|line| line.strip_prefix("Tx Hash: "))
+            .unwrap()
+            .to_string();
+        drop(node);
+        mine(&node_binary, &db, &address);
+        node = start(&node_binary, &db, &rpc, &p2p);
+        let history = get(
+            &rpc,
+            &format!("/explorer/address/{address}?include_emissions=false"),
+        );
+        assert!(
+            history.to_string().contains(&hash),
+            "VM invocation was not committed: {history}"
+        );
+    }
+    let tip = get(&rpc, "/status")["tip_hash"].clone();
+    let history = get(
+        &rpc,
+        &format!("/explorer/address/{address}?include_emissions=false"),
+    );
+    drop(node);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    assert_eq!(get(&rpc, "/status")["tip_hash"], tip);
+    assert_eq!(
+        get(
+            &rpc,
+            &format!("/explorer/address/{address}?include_emissions=false")
+        ),
+        history
+    );
+    drop(node);
+    fs::remove_dir_all(root).unwrap();
+}

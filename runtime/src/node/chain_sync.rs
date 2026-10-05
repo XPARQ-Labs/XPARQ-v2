@@ -208,42 +208,33 @@ pub(super) fn apply_verified_branch(
     sync: HeaderSyncResult,
     blocks: Vec<Block>,
 ) -> Result<usize, String> {
-    if blocks.len() != sync.headers.len() {
-        return Err("downloaded block count does not match verified headers".into());
-    }
-    for (block, expected) in blocks.iter().zip(&sync.headers) {
-        if block.height() != expected.height
-            || block.header != expected.header
-            || block.hash().map_err(|error| error.to_string())?
-                != expected.hash().map_err(|error| error.to_string())?
-        {
-            return Err("downloaded block does not match verified header".into());
-        }
-    }
-    let count = blocks.len();
-    let included = blocks
-        .iter()
-        .flat_map(|block| block.operations().iter())
-        .map(|operation| {
-            operation
-                .id()
-                .map(|id| id.into_bytes())
-                .map_err(|error| error.to_string())
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
+    apply_verified_branch_stream(database, sync, blocks.into_iter().map(Ok))
+}
+
+/// Apply a fully downloaded branch without materializing a second body vector.
+/// The ledger is staged privately and storage/cache change only after validation.
+pub(super) fn apply_verified_branch_stream<I>(
+    database: &Path,
+    sync: HeaderSyncResult,
+    mut blocks: I,
+) -> Result<usize, String>
+where
+    I: Iterator<Item = Result<Block, String>>,
+{
+    let count = sync.headers.len();
+    let new_tip = sync
+        .headers
+        .last()
+        .map(|header| header.hash())
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or(sync.ancestor_hash);
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
     let (cached_ledger, _header_checkpoints, current_cumulative_work, current_cumulative_weight) =
         load_or_initialize_header_snapshot(database)?;
-    let mut staged = cached_ledger.as_ref().clone();
-    let old_tip = staged.tip_hash();
-    let new_tip = blocks
-        .last()
-        .map(Block::hash)
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .unwrap_or(sync.ancestor_hash);
+    let old_tip = cached_ledger.tip_hash();
     let current_tip = old_tip.ok_or("canonical chain has no tip during reorg")?;
     if !compare_chain_tips(
         sync.peer_work,
@@ -258,35 +249,55 @@ pub(super) fn apply_verified_branch(
         println!("sync: downloaded peer branch is no longer preferred after local tip advanced");
         return Ok(0);
     }
-    let mut disconnect = Vec::new();
-    let mut height = staged.tip_height();
-    while height.is_some_and(|height| height > sync.ancestor_height) {
-        let current = height.expect("height was checked above");
-        disconnect.push(
-            staged
-                .chain
-                .block(&current)
-                .cloned()
-                .ok_or("reorg disconnect block is missing from canonical chain")?,
-        );
-        height = current.0.checked_sub(1).map(Height);
-    }
-    let ancestor = staged
+    let ancestor = cached_ledger
         .chain
-        .block(&sync.ancestor_height)
+        .header(&sync.ancestor_height)
         .ok_or("reorg ancestor is missing from canonical chain")?;
     if ancestor.hash().map_err(|error| error.to_string())? != sync.ancestor_hash {
         return Err("reorg ancestor hash does not match canonical chain".into());
     }
-    let plan = ReorgPlan::new(sync.ancestor_hash, old_tip, new_tip, disconnect, blocks)
-        .map_err(|error| format!("invalid canonical reorg plan: {error}"))?;
-    let ancestor = plan.ancestor();
-    let (disconnect, apply) = plan.into_branches();
-    let disconnected_blocks = disconnect.len();
-    let disconnected_operations = disconnect
-        .iter()
+    if !cached_ledger.can_rollback_to(sync.ancestor_height) {
+        // Missing local undo data is recoverable, not evidence of an invalid peer chain.
+        if cached_ledger
+            .state_root()
+            .map_err(|error| error.to_string())?
+            != cached_ledger
+                .chain
+                .header(&cached_ledger.tip_height().ok_or("empty active chain")?)
+                .ok_or("missing active tip header")?
+                .state_root
+        {
+            return Err("active state root does not match canonical tip".into());
+        }
+        drop(_mutation);
+        return super::recovery::recover_branch(database, cached_ledger, sync, blocks);
+    }
+    let mut staged = cached_ledger.as_ref().clone();
+    let mut disconnected_blocks = 0;
+    let mut disconnected_operations = Vec::new();
+    while staged
+        .tip_height()
+        .is_some_and(|height| height > sync.ancestor_height)
+    {
+        let height = staged.tip_height().ok_or("staged chain has no tip")?;
+        let body = canonical_block(database, &staged, height)?;
+        staged
+            .chain
+            .cache_known_block(body)
+            .map_err(|error| error.to_string())?;
+        let removed = staged
+            .rollback_tip()
+            .map_err(|error| format!("rollback canonical tip: {error}"))?;
+        disconnected_blocks += 1;
+        disconnected_operations.push(removed.operations().to_vec());
+    }
+    if staged.tip_hash() != Some(sync.ancestor_hash) {
+        return Err("rollback did not stop at the planned common ancestor".into());
+    }
+    let disconnected_operations = disconnected_operations
+        .into_iter()
         .rev()
-        .flat_map(|block| block.operations().iter().cloned())
+        .flatten()
         .collect::<Vec<_>>();
     let disconnected_hash = disconnected_operations
         .iter()
@@ -297,22 +308,43 @@ pub(super) fn apply_verified_branch(
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    for expected in disconnect {
-        let removed = staged
-            .rollback_tip()
-            .map_err(|error| format!("rollback canonical tip: {error}"))?;
-        if removed.hash().map_err(|error| error.to_string())?
-            != expected.hash().map_err(|error| error.to_string())?
+    let ancestor_body = canonical_block(database, &staged, sync.ancestor_height)?;
+    staged
+        .chain
+        .cache_known_block(ancestor_body)
+        .map_err(|error| error.to_string())?;
+    let mut included = BTreeSet::new();
+    let mut previous = sync.ancestor_hash;
+    for expected in &sync.headers {
+        let block = blocks
+            .next()
+            .ok_or("downloaded block count does not match verified headers")??;
+        if block.height() != expected.height
+            || block.header != expected.header
+            || block.hash().map_err(|error| error.to_string())?
+                != expected.hash().map_err(|error| error.to_string())?
+            || block.previous_hash().0 != previous.0
         {
-            return Err("rollback removed a block outside the reorg disconnect plan".into());
+            return Err("downloaded block does not match verified header branch".into());
         }
-    }
-    if staged.tip_hash() != Some(ancestor) {
-        return Err("rollback did not stop at the planned common ancestor".into());
-    }
-    for block in apply {
+        previous = block.hash().map_err(|error| error.to_string())?;
+        for operation in block.operations() {
+            included.insert(
+                operation
+                    .id()
+                    .map_err(|error| error.to_string())?
+                    .into_bytes(),
+            );
+        }
         apply_block(&mut staged, block)
             .map_err(|error| format!("apply synchronized block: {error}"))?;
+        super::journal::prune_journals(database, &mut staged)?;
+    }
+    if blocks.next().is_some() {
+        return Err("downloaded block count does not match verified headers".into());
+    }
+    if staged.tip_hash() != Some(new_tip) {
+        return Err("applied branch does not reach the verified tip".into());
     }
     let mut mempool_candidates = disconnected_operations;
     mempool_candidates.extend(read_pending_operations(database)?);
@@ -349,10 +381,10 @@ pub(super) fn ledger_header_locator(ledger: &Ledger) -> Result<Vec<([u8; 32], He
 
         let block = ledger
             .chain
-            .block(&current)
+            .header(&current)
             .ok_or("canonical header is missing")?;
 
-        let hash = block.header.hash().map_err(|error| error.to_string())?.0;
+        let hash = block.hash().map_err(|error| error.to_string())?.0;
 
         locator.push((hash, current));
 
@@ -384,7 +416,7 @@ pub(super) fn ledger_header_state_at_height(
 ) -> Result<kernel::consensus::HeaderValidationState, String> {
     let target_block = ledger
         .chain
-        .block(&target_height)
+        .header(&target_height)
         .ok_or("canonical ancestor height is missing")?;
 
     let checkpoint = checkpoints
@@ -394,7 +426,7 @@ pub(super) fn ledger_header_state_at_height(
 
     let checkpoint_block = ledger
         .chain
-        .block(&checkpoint.height)
+        .header(&checkpoint.height)
         .ok_or("checkpoint block is missing from canonical chain")?;
 
     let checkpoint_hash = checkpoint_block
@@ -420,20 +452,19 @@ pub(super) fn ledger_header_state_at_height(
 
         let block = ledger
             .chain
-            .block(&height)
+            .header(&height)
             .ok_or("canonical block is missing after checkpoint")?;
 
-        let block_work = kernel::consensus::block_work(block.target_bits()).ok_or_else(|| {
+        let block_work = kernel::consensus::block_work(block.target_bits).ok_or_else(|| {
             format!(
                 "invalid target bits {:08x} at height {}",
-                block.target_bits(),
-                height.0,
+                block.target_bits, height.0,
             )
         })?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 
-        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight()));
+        cumulative_weight = cumulative_weight.saturating_add(u64::from(block.block_weight));
 
         next_height = value.checked_add(1);
     }
@@ -446,12 +477,12 @@ pub(super) fn ledger_header_state_at_height(
 
     let difficulty_anchor_block = ledger
         .chain
-        .block(&difficulty_anchor_height)
+        .header(&difficulty_anchor_height)
         .ok_or("difficulty anchor is missing from canonical chain")?;
 
     let difficulty_anchor = kernel::consensus::HeaderAtHeight::new(
         difficulty_anchor_height,
-        difficulty_anchor_block.header.clone(),
+        difficulty_anchor_block.clone(),
     );
 
     let mut recent_headers = Vec::new();
@@ -468,12 +499,12 @@ pub(super) fn ledger_header_state_at_height(
 
             let block = ledger
                 .chain
-                .block(&current)
+                .header(&current)
                 .ok_or("recent canonical header is missing")?;
 
             recent_headers.push(kernel::consensus::HeaderAtHeight::new(
                 current,
-                block.header.clone(),
+                block.clone(),
             ));
 
             if height == target_height.0 {
@@ -488,7 +519,7 @@ pub(super) fn ledger_header_state_at_height(
 
     Ok(kernel::consensus::HeaderValidationState {
         height: target_height,
-        header: target_block.header.clone(),
+        header: target_block.clone(),
         cumulative_work,
         cumulative_weight,
         difficulty_anchor,

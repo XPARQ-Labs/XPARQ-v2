@@ -54,8 +54,52 @@ impl Chain {
             .collect()
     }
 
+    /// Resident bodies only; an evicted body must be read from durable storage.
     pub fn blocks(&self) -> impl DoubleEndedIterator<Item = &Block> {
         self.blocks.values()
+    }
+
+    /// Headers remain authoritative even when historical bodies leave a node cache.
+    pub fn headers(&self) -> impl DoubleEndedIterator<Item = (&Height, &Header)> {
+        self.headers.iter()
+    }
+
+    /// Drop old resident bodies only. Callers must durably store them first.
+    /// Genesis and the tip remain resident; their bytes are included in the budget.
+    pub fn retain_recent_bodies(
+        &mut self,
+        max_bytes: usize,
+        max_blocks: usize,
+    ) -> Result<(), ChainError> {
+        let mut bytes = 0_usize;
+        let mut count = 0_usize;
+        let mut remove = Vec::new();
+        for (height, block) in self.blocks.iter().rev() {
+            let size = block.weight()?;
+            let pinned = height.0 == 0 || Some(*height) == self.tip_height;
+            if pinned || (count < max_blocks && size <= max_bytes.saturating_sub(bytes)) {
+                bytes = bytes.saturating_add(size);
+                count += 1;
+            } else {
+                remove.push(*height);
+            }
+        }
+        for height in remove {
+            self.blocks.remove(&height);
+        }
+        Ok(())
+    }
+
+    /// Rehydrate an already known body without changing chain position or state.
+    pub fn cache_known_block(&mut self, block: Block) -> Result<(), ChainError> {
+        if self.headers.get(&block.height()) != Some(&block.header) {
+            return Err(ChainError::InvalidParent);
+        }
+        block
+            .validate_structure()
+            .map_err(|_| ChainError::InvalidParent)?;
+        self.blocks.insert(block.height(), block);
+        Ok(())
     }
 
     pub const fn tip_height(&self) -> Option<Height> {

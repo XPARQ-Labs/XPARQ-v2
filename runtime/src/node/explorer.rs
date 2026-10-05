@@ -171,10 +171,7 @@ pub(super) fn explorer_address_response(
                     continue;
                 }
 
-                let block = ledger
-                    .chain
-                    .block(&height)
-                    .ok_or("indexed emission block is missing from the canonical chain")?;
+                let block = canonical_block(database, ledger, height)?;
 
                 let emission = block
                     .emission()
@@ -207,16 +204,13 @@ pub(super) fn explorer_address_response(
                 height,
                 transaction_index,
             } => {
-                let block = ledger
-                    .chain
-                    .block(&height)
-                    .ok_or("indexed activity block is missing from the canonical chain")?;
+                let block = canonical_block(database, ledger, height)?;
 
-                let transaction = block_program_transactions(block)
+                let transaction = block_program_transactions(&block)
                     .nth(transaction_index)
                     .ok_or("indexed activity transaction is missing from its block")?;
 
-                if let Some(activity) = address_transaction_activity(&transaction, address, block)?
+                if let Some(activity) = address_transaction_activity(&transaction, address, &block)?
                 {
                     activities.push(activity);
                 }
@@ -308,12 +302,9 @@ pub(super) fn explorer_transaction_response(
     let location = index::transaction_location(database, ledger, hash)?
         .ok_or("transaction was not found in the canonical chain")?;
 
-    let block = ledger
-        .chain
-        .block(&location.height)
-        .ok_or("indexed transaction block is missing from the canonical chain")?;
+    let block = canonical_block(database, ledger, location.height)?;
 
-    let transaction = block_program_transactions(block)
+    let transaction = block_program_transactions(&block)
         .nth(location.transaction_index)
         .ok_or("indexed transaction position is missing from its block")?;
 
@@ -321,9 +312,7 @@ pub(super) fn explorer_transaction_response(
         return Err("transaction index does not match the canonical chain".into());
     }
 
-    let burns = ledger
-        .program_call_protocol_burns(location.height)
-        .ok_or("transaction execution receipts are missing")?;
+    let burns = super::journal::protocol_burns(database, ledger, &block)?;
 
     let protocol_burn = burns
         .get(location.transaction_index)
@@ -451,18 +440,41 @@ pub(super) fn status_response(
     }))
 }
 
-pub(super) fn latest_blocks_response(ledger: &Ledger) -> Result<serde_json::Value, String> {
+pub(super) fn latest_blocks_response(
+    database: &Path,
+    ledger: &Ledger,
+) -> Result<serde_json::Value, String> {
     let blocks = ledger
         .chain
-        .blocks()
+        .headers()
         .rev()
         .take(20)
-        .map(|block| block_response(ledger, block))
+        .map(|(height, _)| {
+            let block = canonical_block(database, ledger, *height)?;
+            stored_block_response(database, ledger, &block)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({ "blocks": blocks }))
 }
 
+pub(super) fn stored_block_response(
+    database: &Path,
+    ledger: &Ledger,
+    block: &Block,
+) -> Result<serde_json::Value, String> {
+    let burns = super::journal::protocol_burns(database, ledger, block)?;
+    block_response_with_burns(block, burns)
+}
+
+#[cfg(test)]
 pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_json::Value, String> {
+    let burns = ledger
+        .program_call_protocol_burns_for_block(block)
+        .ok_or("transaction execution receipts are missing")?;
+    block_response_with_burns(block, burns)
+}
+
+fn block_response_with_burns(block: &Block, burns: Vec<Zeno>) -> Result<serde_json::Value, String> {
     let gross_subsidy = block
         .emission()
         .map_or(Zeno::from_zeno(0), |emission| emission.subsidy);
@@ -474,9 +486,6 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
     let miner_emission = gross_subsidy
         .checked_sub(state_burn)
         .ok_or("block emission is below its created-state burn")?;
-    let burns = ledger
-        .program_call_protocol_burns(block.height())
-        .ok_or("transaction execution receipts are missing")?;
     let transaction_details = block
         .operations()
         .iter()

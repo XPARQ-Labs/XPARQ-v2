@@ -49,7 +49,7 @@ fn run() -> Result<(), String> {
         .try_into()
         .map_err(|_| "seed must contain exactly 32 bytes")?;
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new(seed_bytes));
-    let owner = address_from_public_key(&seed.public_key());
+    let owner = address_from_public_key(&seed.public_key()).map_err(|error| error.to_string())?;
     let input: CoinShare = args[3]
         .parse()
         .map_err(|e| format!("invalid coin share: {e}"))?;
@@ -58,7 +58,11 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("invalid input amount: {e}"))?;
     let nonce: u64 = args[5].parse().map_err(|e| format!("invalid nonce: {e}"))?;
     let code = fs::read(&args[6]).map_err(|e| e.to_string())?;
-    let program = DeployProgram { owner, nonce, code };
+    let program = DeployProgram {
+        owner,
+        nonce,
+        code: code.into(),
+    };
     program
         .validate_structure()
         .map_err(|e| format!("invalid XPVM code: {e:?}"))?;

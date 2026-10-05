@@ -381,25 +381,53 @@ pub(super) fn persist_chain_and_pending(
     ledger: &Ledger,
     pending: &[BlockOperation],
 ) -> Result<(), String> {
-    let blocks = ledger
-        .chain
-        .blocks()
-        .map(|block| {
+    persist_chain_and_pending_from_store(path, path, ledger, pending)
+}
+
+pub(super) fn persist_chain_and_pending_from_store(
+    path: &Path,
+    source: &Path,
+    ledger: &Ledger,
+    pending: &[BlockOperation],
+) -> Result<(), String> {
+    persist_chain_and_pending_from_store_with_snapshot(path, source, ledger, pending, None)
+}
+
+pub(super) fn persist_chain_and_pending_from_store_with_snapshot(
+    path: &Path,
+    source: &Path,
+    ledger: &Ledger,
+    pending: &[BlockOperation],
+    snapshot: Option<(u64, &[u8])>,
+) -> Result<(), String> {
+    if source != path {
+        for (height, _) in ledger.chain.headers() {
+            let block = canonical_block(source, ledger, *height)?;
+            super::journal::copy_receipt(source, path, ledger, &block)?;
+        }
+    }
+    let blocks = || {
+        ledger.chain.headers().map(|(height, _)| {
+            let block = canonical_block(source, ledger, *height)?;
             Ok(crate::storage::StoredCanonicalBlock {
                 height: block.height().0,
-
                 hash: block.hash().map_err(|error| error.to_string())?.0,
-
-                bytes: block_bytes(block).map_err(|error| error.to_string())?,
-
-                transactions: block_program_transactions(block)
+                bytes: block_bytes(&block).map_err(|error| error.to_string())?,
+                transactions: block_program_transactions(&block)
                     .map(|transaction| transaction.id().map_err(|error| error.to_string()))
                     .collect::<Result<Vec<_>, String>>()?,
-
-                activities: super::index::stored_address_activities(block)?,
+                activities: super::index::stored_address_activities(&block)?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    crate::storage::replace_blocks_and_mempool(path, &blocks, &encode_pending_operations(pending)?)
+    };
+    let pending = encode_pending_operations(pending)?;
+    match snapshot {
+        Some(snapshot) => crate::storage::replace_blocks_mempool_and_snapshot_stream(
+            path,
+            blocks,
+            &pending,
+            Some(snapshot),
+        ),
+        None => crate::storage::replace_blocks_and_mempool_stream(path, blocks, &pending),
+    }
 }

@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use super::*;
 use super::{config::*, gossip::*, mempool::*, state::*, util::*};
 
@@ -37,7 +39,6 @@ pub(super) fn mine_block_database(
     block
         .validate_structure()
         .map_err(|error| format!("mining candidate is invalid: {error}"))?;
-    let height = block.height();
     let found = crate::miner::mine_range(
         &mut block,
         crate::miner::MiningRange {
@@ -59,7 +60,15 @@ pub(super) fn mine_block_database(
     if ledger.tip_hash().map(|hash| hash.0) != Some(block.previous_hash().0) {
         return Err("mined candidate became stale while mining".into());
     }
+    let burned_before = ledger.state.coin.total_burned;
     apply_block(&mut ledger, block.clone()).map_err(|error| error.to_string())?;
+    let state_burn = ledger
+        .state
+        .coin
+        .total_burned
+        .checked_sub(burned_before)
+        .ok_or("block burn accounting decreased unexpectedly")?
+        .as_zeno();
     let included = operations
         .iter()
         .map(|operation| {
@@ -74,13 +83,63 @@ pub(super) fn mine_block_database(
     persist_block_and_pending(database, &block, &remaining)?;
     let _ = update_ledger_cache(database, ledger)?;
     notify_gossip();
-    println!(
-        "mined height={} nonce={} hash={}",
-        height.0,
-        block.header.nonce.0,
-        hex::encode(block.hash().map_err(|error| error.to_string())?.0)
-    );
+    print_mined_block(&block, state_burn);
     Ok(MiningAttempt::Mined)
+}
+
+// Refresh one terminal frame for each mined block; redirected logs remain append-only.
+// state_burn is the block's native protocol burn (archival plus state growth),
+// in zeno; subsidy is the gross emission in XPQ, before burns and miner fees.
+fn print_mined_block(block: &Block, state_burn: u64) {
+    let stdout = std::io::stdout();
+    let terminal = stdout.is_terminal();
+    let mut output = stdout.lock();
+    let height = block.height().0;
+    if !terminal {
+        if let Ok(hash) = block.hash() {
+            let _ = writeln!(
+                output,
+                "mined height={height} nonce={} hash={}",
+                block.header.nonce.0,
+                hex::encode(hash.0)
+            );
+        }
+        return;
+    }
+    {
+        // Replace the current screen without accumulating mining rows in scrollback.
+        // Dumb terminals cannot interpret cursor/erase sequences.
+        if std::env::var("TERM").is_ok_and(|term| term != "dumb") {
+            let _ = write!(output, "\x1b[H\x1b[2J");
+        }
+        let _ = writeln!(
+            output,
+            "\n  XPARQ MINING  |  subsidy: XPQ  |  state_burn: zeno"
+        );
+        let _ = writeln!(
+            output,
+            "{:>9} | {:>10} | {:>12} | {:>12} | {:>8} | {:>10}",
+            "height", "weight", "subsidy", "state_burn", "tx_count", "difficulty"
+        );
+        let _ = writeln!(
+            output,
+            "----------+------------+--------------+--------------+----------+-----------"
+        );
+    }
+    let subsidy = block
+        .emission()
+        .map_or(0, |emission| emission.subsidy.as_zeno());
+    let scale = 10_u64.pow(kernel::monetary::coin::DECIMALS.into());
+    let subsidy = format!("{}.{:08}", subsidy / scale, subsidy % scale);
+    let subsidy = subsidy.trim_end_matches('0').trim_end_matches('.');
+    let _ = writeln!(
+        output,
+        "{height:>9} | {:>10} | {subsidy:>12} | {state_burn:>12} | {:>8} | {:>10}",
+        block.block_weight(),
+        block.operations().len(),
+        block.target_bits()
+    );
+    let _ = output.flush();
 }
 
 pub(super) fn mine_one_block(path: Option<&str>, miner: &str) -> Result<(), String> {

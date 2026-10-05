@@ -222,9 +222,9 @@ mod tests {
                         assert_eq!(Euclid::rem_euclid(&x, &y), 1);
                         assert_eq!(Euclid::rem_euclid(&-x, &y), 2);
                         assert_eq!((Euclid::div_euclid(&x, &y), Euclid::rem_euclid(&x, &y)), Euclid::div_rem_euclid(&x, &y));
-                        let x: $t = $t::min_value() + 1;
+                        let x: $t = $t::MIN + 1;
                         let y: $t = -1;
-                        assert_eq!(Euclid::div_euclid(&x, &y), $t::max_value());
+                        assert_eq!(Euclid::div_euclid(&x, &y), $t::MAX);
                     }
                 )+
             };
@@ -264,8 +264,8 @@ mod tests {
             ($($t:ident)+) => {
                 $(
                     {
-                        assert_eq!(CheckedEuclid::checked_div_euclid(&$t::min_value(), &-1), None);
-                        assert_eq!(CheckedEuclid::checked_rem_euclid(&$t::min_value(), &-1), None);
+                        assert_eq!(CheckedEuclid::checked_div_euclid(&$t::MIN, &-1), None);
+                        assert_eq!(CheckedEuclid::checked_rem_euclid(&$t::MIN, &-1), None);
                         assert_eq!(CheckedEuclid::checked_div_euclid(&1, &0), None);
                         assert_eq!(CheckedEuclid::checked_rem_euclid(&1, &0), None);
                     }

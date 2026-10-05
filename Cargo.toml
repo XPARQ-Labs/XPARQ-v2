@@ -18,7 +18,7 @@ debug = true
 [workspace.dependencies]
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
 bip39 = "2.2"
-borsh = { version = "1.5", features = ["derive"], path = "depend/traits/borsh" }
+borsh = { version = "1.5", features = ["derive", "rc"], path = "depend/traits/borsh" }
 chacha20 = { version = "0.10.1", default-features = false, features = ["rng", "zeroize"], path = "depend/sqisign/chacha20-0.10.1" }
 getrandom = { version = "0.4.3", default-features = false }
 fn-dsa = { version = "0.4.0", default-features = false, path = "depend/fn-dsa/fn-dsa" }
@@ -26,7 +26,7 @@ rand_core_06 = { package = "rand_core", version = "0.6.4", features = ["getrando
 hex = "0.4"
 futures = "0.3"
 igd-next = "0.16"
-litep2p = "0.15.2"
+litep2p = { version = "0.15.2", path = "depend/network/litep2p" }
 redb = "4.2.0"
 ml_dsa = { package = "ml-dsa", version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"], path = "depend/mldsa/ml-dsa" }
 serde = { version = "1", features = ["derive"], path = "depend/traits/serde" }
@@ -34,12 +34,12 @@ serde_json = "1"
 sha3 = { version = "0.12.0", default-features = false, path = "depend/sha3/sha3" }
 sqisign_rs = { package = "xparq-sqisign", version = "0.1.0", path = "depend/sqisign/sqisign-rs" }
 static_assertions = { version = "1.1.0", path = "depend/utils/static_assertions" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
 zeroize = { version = "1.9.0", features = ["alloc", "derive"], path = "depend/traits/zeroize" }
 rand_10 = { package = "rand", version = "0.10.2", features = ["sys_rng"], path = "depend/sqisign/rand-0.10" }
 
-crypto = { path = "crypto", default-features = false }
-kernel = { path = "kernel", default-features = false }
+crypto = { version = "0.1.0", path = "crypto", default-features = false }
+kernel = { version = "0.1.0", path = "kernel", default-features = false }
 
 [patch.crates-io]
 serde = { path = "depend/traits/serde" }

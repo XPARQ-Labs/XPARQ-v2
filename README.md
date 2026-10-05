@@ -15,12 +15,16 @@ The project is organized around a small set of components:
 > [!WARNING]
 > XPARQ is under active development. Protocol rules, database formats, networking, wallet formats, and APIs may change. Do not use funds or keys that you cannot afford to lose.
 
+Build and dependency-check configuration is documented in
+[Tooling](docs/TOOLING.md). `Cargo.lock` is committed, and `build.sh` uses
+`--locked` to prevent dependency resolution changes during builds.
+
 ## Requirements
 
 XPARQ currently requires:
 
 - Git
-- Rust **1.90 or newer**
+- Rust **1.99.0** (selected by `rust-toolchain.toml`; rustup installs it when needed)
 - Cargo
 - A supported 64-bit operating system
 
@@ -216,6 +220,15 @@ mining: enabled on the local canonical tip
 ```
 
 Mining rewards are assigned to the address supplied through `--miner`.
+
+Interactive terminals show mined blocks in a table with `height`, `weight`,
+`subsidy`, `state_burn`, `tx_count` and `difficulty`. Each mined block replaces
+the previous terminal frame rather than appending rows. Terminals with `TERM=dumb`
+or no `TERM` retain plain output. Weight is the consensus block weight; subsidy is gross emission in XPQ;
+state_burn is the block's total native protocol burn in zeno (archival plus state
+growth); tx_count counts all non-emission block operations; difficulty is the
+header's decimal compact target bits, not a relative difficulty multiplier.
+Redirected output retains the original single-line format and full hash for log processing.
 
 ## Public node
 
@@ -542,6 +555,21 @@ work, downloads matching blocks, and applies the same fork-choice and reorg
 logic as the legacy transport. It also relays new blocks and mempool transactions.
 Its devnet protocol names are `/xparq/devnet/blocks/2` and
 `/xparq/devnet/announce/2`.
+
+The experimental transport stages block bodies in a resumable redb download cache,
+with up to 100,000 verified headers and an 8 GiB logical body budget by default.
+Use `node run --litep2p --sync-staging-mib 16384` to select a 16 GiB budget.
+Canonical branch application and persistence consume bodies as a stream. Request
+timeouts and connection limits remain enforced; ledger history still consumes RAM.
+Per-peer inbound count/byte budgets guard request serving and announcement validation;
+header/body continuation requests are paced to preserve healthy downloads.
+Sync polls rotate among eligible peers; stalled sessions release their slot and a
+replacement peer can reuse matching staged bodies.
+Bootstrap endpoints accept `HOST:PORT@PEER_ID`; bounded discovery defaults to public
+addresses and persists successfully dialed endpoints for reconnect after restart.
+See [litep2p discovery and DNS policy](docs/LITEP2P_DISCOVERY.md).
+See [litep2p hardening and verification](docs/LITEP2P_HARDENING.md).
+
 
 ## Node commands
 

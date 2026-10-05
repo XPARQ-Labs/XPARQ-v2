@@ -25,6 +25,7 @@ protection against double claims, rounding and overflow rules, rollback and
 reorganization, and the stake → claim → unstake lifecycle through the node
 and wallet.
 
-For a supported deployment example, use [return7](../README.md).
+For a working stateful example, use the [persistent counter](../counter/README.md).
+For a constant-return deployment, use [return7](../README.md).
 See the VM limits in [XPVM](../../docs/XPVM.md) and the system application
 pattern in [ProgramCall](../../docs/PROGRAM_CALL.md).

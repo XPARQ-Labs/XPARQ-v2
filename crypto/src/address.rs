@@ -1,7 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{HashDomain, PublicKey, error::CryptoError, hash};
+use crate::{AccountSignatureScheme, HashDomain, PublicKey, error::CryptoError, hash};
 
 pub const ADDRESS_SIZE: usize = 32;
 pub const ADDRESS_ENCODED_SIZE: usize = 45;
@@ -43,21 +43,24 @@ impl Address {
     pub const fn into_bytes(self) -> [u8; ADDRESS_SIZE] {
         self.0
     }
+
+    /// Derive using the existing framed hash preimage after checking key length.
+    /// Length validation is structural; ownership still requires a valid signature.
+    pub fn derive(scheme: AccountSignatureScheme, public_key: &[u8]) -> Result<Self, CryptoError> {
+        if public_key.len() != scheme.public_key_size() {
+            return Err(CryptoError::InvalidPublicKeyLength);
+        }
+        let mut material = Vec::with_capacity(1 + public_key.len());
+        material.push(scheme.id());
+        material.extend_from_slice(public_key);
+        let digest = hash::domain(HashDomain::Address, &material);
+        Ok(Self::from_bytes(*digest.as_bytes()))
+    }
 }
 
-pub fn address_from_public_key(public_key: &PublicKey) -> Address {
-    let mut material = Vec::with_capacity(1 + public_key.bytes.len());
-
-    material.push(public_key.account as u8);
-    material.extend_from_slice(&public_key.bytes);
-
-    address_from_key_material(&material)
-}
-
-fn address_from_key_material(key_material: &[u8]) -> Address {
-    let digest = hash::domain(HashDomain::Address, key_material);
-
-    Address::from_bytes(*digest.as_bytes())
+/// Reject malformed public keys instead of producing an address from arbitrary bytes.
+pub fn address_from_public_key(public_key: &PublicKey) -> Result<Address, CryptoError> {
+    Address::derive(public_key.scheme(), &public_key.bytes)
 }
 
 pub fn address_to_string(address: &Address) -> String {
@@ -142,6 +145,97 @@ fn xparq_digit(character: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheme_ids_and_borsh_wire_bytes_are_frozen() {
+        let schemes = [
+            AccountSignatureScheme::MlDsa44,
+            AccountSignatureScheme::MlDsa65,
+            AccountSignatureScheme::MlDsa87,
+        ];
+        assert_eq!(AccountSignatureScheme::ALL, schemes);
+        for (scheme, id) in schemes.into_iter().zip([1, 2, 3]) {
+            assert_eq!(scheme.id(), id);
+            assert_eq!(AccountSignatureScheme::try_from(id), Ok(scheme));
+            assert_eq!(borsh::to_vec(&scheme).unwrap(), vec![id]);
+            assert_eq!(
+                borsh::from_slice::<AccountSignatureScheme>(&[id]).unwrap(),
+                scheme
+            );
+        }
+        for id in 0..=u8::MAX {
+            if !(1..=3).contains(&id) {
+                assert_eq!(
+                    AccountSignatureScheme::try_from(id),
+                    Err(CryptoError::InvalidAccountScheme)
+                );
+                assert!(borsh::from_slice::<AccountSignatureScheme>(&[id]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn both_derivation_entry_points_reject_wrong_key_lengths_and_scheme_pairings() {
+        for scheme in AccountSignatureScheme::ALL {
+            for length in [
+                0,
+                scheme.public_key_size() - 1,
+                scheme.public_key_size() + 1,
+            ] {
+                let key = PublicKey {
+                    account: scheme,
+                    bytes: vec![0; length],
+                };
+                assert_eq!(
+                    Address::derive(scheme, &key.bytes),
+                    Err(CryptoError::InvalidPublicKeyLength)
+                );
+                assert_eq!(
+                    address_from_public_key(&key),
+                    Err(CryptoError::InvalidPublicKeyLength)
+                );
+            }
+            for other in AccountSignatureScheme::ALL {
+                if other != scheme {
+                    assert!(Address::derive(scheme, &vec![0; other.public_key_size()]).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mldsa_address_payloads_preserve_the_existing_framed_hash_vectors() {
+        // Fixed literal byte fixtures, independent of key generation. These
+        // freeze structural derivation, not proof of possession of these keys.
+        // Expected SHA3-256 bytes were computed independently with Python hashlib:
+        // tag || u64_le(1 + key_size) || scheme_id || public_key.
+        let fixtures: [(AccountSignatureScheme, &[u8], &str); 3] = [
+            (
+                AccountSignatureScheme::MlDsa44,
+                &[0xa5; 1312],
+                "d046f49144482f6f14734f95c46041ab74bb1453c1485732607a182ba6a8a6c5",
+            ),
+            (
+                AccountSignatureScheme::MlDsa65,
+                &[0xa5; 1952],
+                "9f2f43540f5f717ab6d300b0bf8a65f81a5ec0373ad48cf7cebf8340ffba01fe",
+            ),
+            (
+                AccountSignatureScheme::MlDsa87,
+                &[0xa5; 2592],
+                "3008d49947ff92fe8ff8497f15569ce1c632c427e837cce79abeb589bdb0aad5",
+            ),
+        ];
+        for (scheme, bytes, expected) in fixtures {
+            let address = Address::derive(scheme, bytes).unwrap();
+            assert_eq!(hex::encode(address.as_bytes()), expected);
+            let key = PublicKey {
+                account: scheme,
+                bytes: bytes.to_vec(),
+            };
+            assert_eq!(address_from_public_key(&key), Ok(address));
+        }
+    }
 
     #[test]
     fn address_roundtrip() {

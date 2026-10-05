@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -61,7 +62,7 @@ pub struct StoredAddressActivity {
     pub transaction_index: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StoredCanonicalBlock {
     pub height: u64,
     pub hash: [u8; 32],
@@ -70,7 +71,7 @@ pub struct StoredCanonicalBlock {
     pub activities: Vec<StoredAddressActivity>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CanonicalIndexBlock {
     pub height: u64,
     pub hash: [u8; 32],
@@ -238,6 +239,9 @@ fn encode_transaction_location(height: u64, transaction_index: u64) -> [u8; 16] 
 type CachedDatabase = Option<(PathBuf, Arc<Database>)>;
 
 static DATABASE: OnceLock<Mutex<CachedDatabase>> = OnceLock::new();
+// Readers may outlive a change of the most-recently used directory. Weak handles
+// let open() reuse those databases without retaining every historical directory.
+static LIVE_DATABASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Database>>>> = OnceLock::new();
 
 pub fn canonical_index_tip(directory: &Path) -> Result<Option<(u64, [u8; 32])>, String> {
     let database = open(directory)?;
@@ -487,7 +491,7 @@ mod coin_origin_tests {
     #[test]
     fn transaction_outputs_and_miner_fee_point_to_program_invocation_id() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([5; 32]));
-        let signer = address_from_public_key(&seed.public_key());
+        let signer = address_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([7; kernel::crypto::HASH_SIZE]);
         let mut spend = CoinTransition::coin(
             signer,
@@ -547,7 +551,7 @@ mod coin_origin_tests {
             program::DeployProgram,
         };
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([6; 32]));
-        let owner = address_from_public_key(&seed.public_key());
+        let owner = address_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([8; kernel::crypto::HASH_SIZE]);
         let mut payment = CoinTransition::coin(
             owner,
@@ -565,7 +569,7 @@ mod coin_origin_tests {
             deploy: DeployProgram {
                 owner,
                 nonce: 1,
-                code,
+                code: code.into(),
             },
             payment,
             authorization: AccountAuthorization {
@@ -690,26 +694,16 @@ pub fn read_address_activities(
     Ok(activities)
 }
 
-pub fn rebuild_canonical_indexes(
-    directory: &Path,
-    blocks: &[CanonicalIndexBlock],
-) -> Result<(), String> {
-    let tip = blocks
-        .last()
-        .ok_or("cannot rebuild canonical indexes from an empty chain")?;
-    let chain = genesis_context(&blocks[0].bytes)?;
-    let canonical_blocks = blocks
-        .iter()
-        .map(|block| decode_canonical_block(&block.bytes))
-        .collect::<Result<Vec<_>, _>>()?;
-    for (actual, indexed) in canonical_blocks.iter().zip(blocks) {
-        if actual.height().0 != indexed.height
-            || actual.hash().map_err(|error| error.to_string())?.0 != indexed.hash
-        {
-            return Err("canonical blocks changed before index rebuild".into());
-        }
-    }
-
+pub fn rebuild_canonical_indexes_stream<F, I>(directory: &Path, blocks: F) -> Result<(), String>
+where
+    F: Fn() -> I,
+    I: Iterator<Item = Result<CanonicalIndexBlock, String>>,
+{
+    let first = blocks()
+        .next()
+        .ok_or("cannot rebuild indexes from an empty chain")??;
+    let chain = genesis_context(&first.bytes)?;
+    drop(first);
     let database = open(directory)?;
 
     let transaction = database
@@ -748,8 +742,17 @@ pub fn rebuild_canonical_indexes(
             .retain(|_, _| false)
             .map_err(|error| format!("clear coin origin index: {error}"))?;
 
-        for (block, canonical) in blocks.iter().zip(&canonical_blocks) {
-            insert_coin_origins(&mut origin_index, canonical, chain)?;
+        let mut tip = None;
+        for block in blocks() {
+            let block = block?;
+            let canonical = decode_canonical_block(&block.bytes)?;
+            if canonical.height().0 != block.height
+                || canonical.hash().map_err(|error| error.to_string())?.0 != block.hash
+            {
+                return Err("canonical blocks changed before index rebuild".into());
+            }
+            tip = Some((block.height, block.hash));
+            insert_coin_origins(&mut origin_index, &canonical, chain)?;
             if block_index
                 .get(block.hash.as_slice())
                 .map_err(|error| format!("inspect block hash index: {error}"))?
@@ -800,16 +803,17 @@ pub fn rebuild_canonical_indexes(
             }
         }
 
+        let (tip_height, tip_hash) = tip.ok_or("cannot rebuild indexes from an empty chain")?;
         let mut metadata = transaction
             .open_table(META)
             .map_err(|error| format!("open metadata table: {error}"))?;
 
         metadata
-            .insert(INDEX_TIP_HEIGHT_KEY, tip.height.to_le_bytes().as_slice())
+            .insert(INDEX_TIP_HEIGHT_KEY, tip_height.to_le_bytes().as_slice())
             .map_err(|error| format!("write canonical index tip height: {error}"))?;
 
         metadata
-            .insert(INDEX_TIP_HASH_KEY, tip.hash.as_slice())
+            .insert(INDEX_TIP_HASH_KEY, tip_hash.as_slice())
             .map_err(|error| format!("write canonical index tip hash: {error}"))?;
         metadata
             .insert(ADDRESS_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
@@ -835,6 +839,16 @@ fn open(directory: &Path) -> Result<Arc<Database>, String> {
         return Ok(Arc::clone(database));
     }
 
+    let mut live = LIVE_DATABASES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|_| "redb live handle registry is poisoned")?;
+    live.retain(|_, handle| handle.strong_count() != 0);
+    if let Some(database) = live.get(directory).and_then(Weak::upgrade) {
+        *slot = Some((directory.to_path_buf(), Arc::clone(&database)));
+        return Ok(database);
+    }
+
     fs::create_dir_all(directory).map_err(|error| format!("create database directory: {error}"))?;
 
     let database = Arc::new(
@@ -843,6 +857,7 @@ fn open(directory: &Path) -> Result<Arc<Database>, String> {
     );
 
     initialize(&database)?;
+    live.insert(directory.to_path_buf(), Arc::downgrade(&database));
 
     *slot = Some((directory.to_path_buf(), Arc::clone(&database)));
 
@@ -981,6 +996,98 @@ pub fn has_blocks(directory: &Path) -> Result<bool, String> {
         > 0)
 }
 
+/// Read one canonical body without materializing the historical block log.
+pub fn read_block_at_height(directory: &Path, height: u64) -> Result<Option<Vec<u8>>, String> {
+    let database = open(directory)?;
+    let transaction = database
+        .begin_read()
+        .map_err(|error| format!("begin block read: {error}"))?;
+    let table = transaction
+        .open_table(BLOCKS)
+        .map_err(|error| format!("open blocks table: {error}"))?;
+    let value = table
+        .get(height)
+        .map_err(|error| format!("read block at height {height}: {error}"))?;
+    value
+        .map(|value| {
+            let bytes = value.value();
+            if bytes.is_empty() || bytes.len() > kernel::block::MAX_BLOCK_SIZE {
+                return Err("stored block size is outside allowed range".to_string());
+            }
+            Ok(bytes.to_vec())
+        })
+        .transpose()
+}
+
+/// A pinned read transaction streams one body at a time from a stable DB generation.
+pub struct CanonicalBodyReader {
+    transaction: redb::ReadTransaction,
+    _database: Arc<Database>,
+    next: u64,
+    last: Option<u64>,
+}
+
+impl CanonicalBodyReader {
+    pub fn new(directory: &Path) -> Result<Self, String> {
+        let database = open(directory)?;
+        let transaction = database
+            .begin_read()
+            .map_err(|error| format!("begin body stream: {error}"))?;
+        let last = {
+            let table = transaction
+                .open_table(BLOCKS)
+                .map_err(|error| format!("open body stream: {error}"))?;
+            table
+                .last()
+                .map_err(|error| format!("read body stream tip: {error}"))?
+                .map(|(height, _)| height.value())
+        };
+        Ok(Self {
+            transaction,
+            _database: database,
+            next: 0,
+            last,
+        })
+    }
+}
+
+impl Iterator for CanonicalBodyReader {
+    type Item = Result<Vec<u8>, String>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let last = self.last?;
+        if self.next > last {
+            self.last = None;
+            return None;
+        }
+        let height = self.next;
+        if height == last {
+            self.last = None;
+        } else {
+            self.next += 1;
+        }
+        let result = (|| {
+            let table = self
+                .transaction
+                .open_table(BLOCKS)
+                .map_err(|error| format!("open body stream: {error}"))?;
+            let value = table
+                .get(height)
+                .map_err(|error| format!("read streamed body: {error}"))?
+                .ok_or_else(|| format!("local block body missing at height {height}"))?;
+            let bytes = value.value();
+            if bytes.is_empty() || bytes.len() > kernel::block::MAX_BLOCK_SIZE {
+                return Err(format!("local block size outside range at height {height}"));
+            }
+            Ok(bytes.to_vec())
+        })();
+        if result.is_err() {
+            self.last = None;
+        }
+        Some(result)
+    }
+}
+
+#[cfg(test)]
 pub fn read_blocks(directory: &Path) -> Result<Vec<Vec<u8>>, String> {
     let database = open(directory)?;
 
@@ -1144,15 +1251,35 @@ pub fn append_block_and_replace_mempool(
         .map_err(|error| format!("commit canonical block, indexes and mempool: {error}"))
 }
 
-pub fn replace_blocks_and_mempool(
+/// Atomically persist canonical blocks from a repeatable streaming source.
+/// Only one encoded block and its indexes are materialized at a time.
+pub fn replace_blocks_and_mempool_stream<F, I>(
     directory: &Path,
-    blocks: &[StoredCanonicalBlock],
+    blocks: F,
     mempool: &[Vec<u8>],
-) -> Result<(), String> {
-    let first = blocks
-        .first()
-        .ok_or("canonical reorg cannot persist an empty chain")?;
+) -> Result<(), String>
+where
+    F: Fn() -> I,
+    I: Iterator<Item = Result<StoredCanonicalBlock, String>>,
+{
+    replace_blocks_mempool_and_snapshot_stream(directory, blocks, mempool, None)
+}
+
+pub(crate) fn replace_blocks_mempool_and_snapshot_stream<F, I>(
+    directory: &Path,
+    blocks: F,
+    mempool: &[Vec<u8>],
+    snapshot: Option<(u64, &[u8])>,
+) -> Result<(), String>
+where
+    F: Fn() -> I,
+    I: Iterator<Item = Result<StoredCanonicalBlock, String>>,
+{
+    let first = blocks()
+        .next()
+        .ok_or("canonical reorg cannot persist an empty chain")??;
     let chain = genesis_context(&first.bytes)?;
+    drop(first);
     let database = open(directory)?;
 
     let transaction = database
@@ -1165,7 +1292,8 @@ pub fn replace_blocks_and_mempool(
             .map_err(|error| format!("open blocks table: {error}"))?;
 
         let mut common_height = None;
-        for block in blocks {
+        for block in blocks() {
+            let block = block?;
             let matches = canonical
                 .get(block.height)
                 .map_err(|error| format!("compare canonical block: {error}"))?
@@ -1211,7 +1339,9 @@ pub fn replace_blocks_and_mempool(
             .retain(|_, _| false)
             .map_err(|error| format!("clear coin origin index: {error}"))?;
 
-        for block in blocks {
+        let mut tip = None;
+        for block in blocks() {
+            let block = block?;
             let canonical_block = decode_canonical_block(&block.bytes)?;
             if canonical_block.height().0 != block.height
                 || canonical_block.hash().map_err(|error| error.to_string())?.0 != block.hash
@@ -1238,6 +1368,7 @@ pub fn replace_blocks_and_mempool(
                     .map_err(|error| format!("insert transaction index: {error}"))?;
             }
 
+            tip = Some((block.height, block.hash));
             for activity in &block.activities {
                 let key = encode_address_activity_key(
                     activity.address,
@@ -1251,24 +1382,26 @@ pub fn replace_blocks_and_mempool(
             }
         }
 
-        let tip = blocks
-            .last()
-            .ok_or("canonical reorg cannot persist an empty chain")?;
+        let (tip_height, tip_hash) = tip.ok_or("canonical reorg cannot persist an empty chain")?;
 
         let mut metadata = transaction
             .open_table(META)
             .map_err(|error| format!("open metadata table: {error}"))?;
 
         metadata
-            .insert(INDEX_TIP_HEIGHT_KEY, tip.height.to_le_bytes().as_slice())
+            .insert(INDEX_TIP_HEIGHT_KEY, tip_height.to_le_bytes().as_slice())
             .map_err(|error| format!("write canonical index tip height: {error}"))?;
 
         metadata
-            .insert(INDEX_TIP_HASH_KEY, tip.hash.as_slice())
+            .insert(INDEX_TIP_HASH_KEY, tip_hash.as_slice())
             .map_err(|error| format!("write canonical index tip hash: {error}"))?;
         metadata
             .insert(COIN_ORIGIN_INDEX_VERSION_KEY, &[1_u8][..])
             .map_err(|error| format!("write coin origin index version: {error}"))?;
+
+        metadata
+            .insert(ADDRESS_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
+            .map_err(|error| format!("write program address index version: {error}"))?;
 
         let mut transactions = transaction
             .open_table(MEMPOOL)
@@ -1282,6 +1415,14 @@ pub fn replace_blocks_and_mempool(
         snapshots
             .retain(|height, _| common_height.is_some_and(|last| height <= last))
             .map_err(|error| format!("discard snapshots from replaced branch: {error}"))?;
+        if let Some((height, bytes)) = snapshot {
+            if height != tip_height {
+                return Err("recovery snapshot height does not match canonical tip".into());
+            }
+            snapshots
+                .insert(height, bytes)
+                .map_err(|error| format!("publish recovery snapshot: {error}"))?;
+        }
     }
 
     transaction
@@ -1545,4 +1686,62 @@ pub fn clear_canonical_indexes_for_test(directory: &Path) -> Result<(), String> 
     transaction
         .commit()
         .map_err(|error| format!("commit canonical index test clear: {error}"))
+}
+
+#[cfg(test)]
+mod body_stream_tests {
+    use super::*;
+
+    #[test]
+    fn missing_or_oversized_local_bodies_fail_without_returning_a_partial_log() {
+        let directory = std::env::temp_dir().join(format!(
+            "xparq-body-stream-errors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let database = open(&directory).unwrap();
+        let bytes = kernel::block::block_bytes(&kernel::genesis::genesis_block().unwrap()).unwrap();
+        let transaction = database.begin_write().unwrap();
+        {
+            let mut table = transaction.open_table(BLOCKS).unwrap();
+            table.insert(0, bytes.as_slice()).unwrap();
+            table.insert(2, bytes.as_slice()).unwrap();
+        }
+        transaction.commit().unwrap();
+        let mut reader = CanonicalBodyReader::new(&directory).unwrap();
+        assert_eq!(reader.next().unwrap().unwrap(), bytes);
+        assert!(reader.next().unwrap().unwrap_err().contains("missing"));
+        assert!(reader.next().is_none());
+        let transaction = database.begin_write().unwrap();
+        {
+            let mut table = transaction.open_table(BLOCKS).unwrap();
+            table
+                .insert(1, vec![0; kernel::block::MAX_BLOCK_SIZE + 1].as_slice())
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        assert!(
+            read_block_at_height(&directory, 1)
+                .unwrap_err()
+                .contains("range")
+        );
+        let mut reader = CanonicalBodyReader::new(&directory).unwrap();
+        assert!(reader.next().unwrap().is_ok());
+        assert!(reader.next().unwrap().unwrap_err().contains("range"));
+        assert!(reader.next().is_none());
+    }
+}
+
+/// Release the singleton's handle before deleting an owned recovery database.
+pub(crate) fn release_cached_database(directory: &Path) {
+    if let Some(cache) = DATABASE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            if cache.as_ref().is_some_and(|(path, _)| path == directory) {
+                *cache = None;
+            }
+        }
+    }
 }

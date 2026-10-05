@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io::{Error as IoError, ErrorKind, Read, Write},
+    sync::Arc,
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -68,7 +69,8 @@ pub struct Body {
 pub struct Block {
     pub header: Header,
     pub height: Height,
-    pub body: Body,
+    /// Clones share the payload; body_mut isolates a writer before mutation.
+    pub body: Arc<Body>,
 }
 
 // Bounded decoding avoids trusting a serialized Vec length before the block-size
@@ -83,10 +85,10 @@ impl BorshDeserialize for Block {
         Ok(Self {
             header,
             height,
-            body: Body {
+            body: Arc::new(Body {
                 emission,
                 operations,
-            },
+            }),
         })
     }
 }
@@ -232,10 +234,10 @@ impl Block {
                 nonce,
             ),
             height,
-            body: Body {
+            body: Arc::new(Body {
                 emission,
                 operations,
-            },
+            }),
         };
 
         block.refresh_block_weight()?;
@@ -406,8 +408,13 @@ impl Block {
         Ok(())
     }
 
+    /// Mutate a private body, preserving any cloned block or ledger view.
+    pub fn body_mut(&mut self) -> &mut Body {
+        Arc::make_mut(&mut self.body)
+    }
+
     pub fn push_operation(&mut self, operation: BlockOperation) -> Result<(), CodecError> {
-        self.body.operations.push(operation);
+        self.body_mut().operations.push(operation);
         self.refresh_commitments()
     }
 }
@@ -505,7 +512,7 @@ mod p3e_replay_tests {
     fn duplicate_fixture() -> BlockOperation {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x51; 32]));
 
-        let signer = address_from_public_key(&seed.public_key());
+        let signer = address_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([0x71; crypto::HASH_SIZE]);
 
         let intent = CoinTransition::coin(

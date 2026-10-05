@@ -42,8 +42,9 @@ effect to staged registry state and journals it for rollback.
 submits deployment. The kernel derives ProgramId from owner, nonce and code hash;
 an owner/nonce pair must be unused. A VM call uses SystemProgramId::VM (2), opcode
 0, and exactly the deployed 32-byte ProgramId as payload, with an authenticated
-XPQ payment. There is no generic VM-call CLI command yet; construct the call
-through the wallet library's `sign_program_call`.
+XPQ payment. Use `wallet program-call --program-id HEX_ID` to sign and submit a VM call.
+The wallet selects XPQ inputs and calculates burn and fees automatically.
+See the [persistent counter example](../examples/counter/README.md).
 
 This bytecode returns 7, with stack limit 1 and no memory pages:
 

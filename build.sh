@@ -24,5 +24,5 @@ if ! command -v cc >/dev/null 2>&1; then
 fi
 
 printf 'Building node and wallet (release)...\n'
-cargo build --release -p node -p wallet "$@"
+cargo build --release --locked -p node -p wallet "$@"
 printf 'Node and wallet built successfully.\n'

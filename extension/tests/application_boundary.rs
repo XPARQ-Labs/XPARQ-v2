@@ -29,7 +29,7 @@ fn seed() -> SigningSeed {
 }
 
 fn funded() -> LedgerState {
-    let owner = address_from_public_key(&seed().public_key());
+    let owner = address_from_public_key(&seed().public_key()).unwrap();
     let amount = Zeno::from_zeno(10_000_000);
     let coins = std::collections::BTreeMap::from([(
         CoinShare::from_bytes([1; 16]),
@@ -47,7 +47,7 @@ fn funded() -> LedgerState {
 
 fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvocation {
     let seed = seed();
-    let signer = address_from_public_key(&seed.public_key());
+    let signer = address_from_public_key(&seed.public_key()).unwrap();
     let chain = ChainContext::new([7; 32]);
     let (input, coin) = state
         .utxos
@@ -151,7 +151,7 @@ impl ApplicationExecutor for BadApplication {
 }
 
 fn register_call() -> ProgramCall {
-    let owner = address_from_public_key(&seed().public_key());
+    let owner = address_from_public_key(&seed().public_key()).unwrap();
     ProgramCall {
         program: SystemProgramId::ASSET,
         opcode: AssetOpcode::Register as u8,
@@ -262,7 +262,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
     // A valid attacker signature still cannot spend an input owned by another key.
     let attacker = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([22; 32]));
     let mut changed = tx;
-    changed.signer = address_from_public_key(&attacker.public_key());
+    changed.signer = address_from_public_key(&attacker.public_key()).unwrap();
     changed.payment.signer = changed.signer;
     let commitment =
         program_invocation_commitment(changed.signer, &changed.call, &changed.payment, chain)
@@ -330,7 +330,7 @@ fn signed_asset_replay_is_rejected_without_changing_committed_state() {
 fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
     let mut state = funded();
     let chain = ChainContext::new([7; 32]);
-    let owner = address_from_public_key(&seed().public_key());
+    let owner = address_from_public_key(&seed().public_key()).unwrap();
     let register = invocation(&state, register_call());
     state
         .apply_program_call_with_applications(

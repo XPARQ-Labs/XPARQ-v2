@@ -260,7 +260,7 @@ mod p3e_authorization_gate_tests {
     }
 
     fn signer(seed: &SigningSeed) -> Address {
-        address_from_public_key(&seed.public_key())
+        address_from_public_key(&seed.public_key()).unwrap()
     }
 
     fn chain(tag: u8) -> ChainContext {
@@ -283,7 +283,7 @@ mod p3e_authorization_gate_tests {
         signer_seed: &SigningSeed,
         chain: ChainContext,
     ) -> AuthorizedProgramInvocation {
-        let signer = crypto::address_from_public_key(&signer_seed.public_key());
+        let signer = crypto::address_from_public_key(&signer_seed.public_key()).unwrap();
         let call = crate::program::system::coin_program::transfer_call();
         let commitment = program_invocation_commitment(signer, &call, &intent, chain).unwrap();
         AuthorizedProgramInvocation {
@@ -318,7 +318,7 @@ mod p3e_authorization_gate_tests {
             DeployProgram {
                 owner: signer,
                 nonce: 1,
-                code,
+                code: code.into(),
             },
             Height(1),
         )

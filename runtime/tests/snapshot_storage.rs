@@ -96,7 +96,8 @@ fn node_restarts_from_a_compact_snapshot() {
             activities: vec![],
         })
         .collect::<Vec<_>>();
-    storage::rebuild_canonical_indexes(&directory, &indexed).unwrap();
+    storage::rebuild_canonical_indexes_stream(&directory, || indexed.iter().cloned().map(Ok))
+        .unwrap();
     assert_eq!(
         storage::read_coin_origin(&directory, emission_id).unwrap(),
         Some(storage::CoinOrigin {
@@ -160,7 +161,8 @@ fn node_restarts_from_a_compact_snapshot() {
             activities: vec![],
         })
         .collect::<Vec<_>>();
-    storage::replace_blocks_and_mempool(&directory, &stored, &[]).unwrap();
+    storage::replace_blocks_and_mempool_stream(&directory, || stored.iter().cloned().map(Ok), &[])
+        .unwrap();
     assert_eq!(
         storage::read_coin_origin(&directory, emission_id).unwrap(),
         None
@@ -189,3 +191,115 @@ fn node_restarts_from_a_compact_snapshot() {
 mod snapshot;
 #[path = "../src/storage.rs"]
 mod storage;
+
+#[test]
+fn streaming_storage_failure_rolls_back_canonical_replacement() {
+    use kernel::{block::block_bytes, genesis::genesis_block};
+    let directory = std::env::temp_dir().join(format!(
+        "xparq-stream-rollback-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let genesis = genesis_block().unwrap();
+    let block = storage::StoredCanonicalBlock {
+        height: 0,
+        hash: genesis.hash().unwrap().0,
+        bytes: block_bytes(&genesis).unwrap(),
+        transactions: vec![],
+        activities: vec![],
+    };
+    storage::replace_blocks_and_mempool_stream(
+        &directory,
+        || std::iter::once(Ok(block.clone())),
+        &[],
+    )
+    .unwrap();
+    let before = storage::read_blocks(&directory).unwrap();
+    let passes = std::cell::Cell::new(0);
+    let error = storage::replace_blocks_and_mempool_stream(
+        &directory,
+        || {
+            passes.set(passes.get() + 1);
+            let mut items = vec![Ok(block.clone())];
+            if passes.get() == 3 {
+                items.push(Err("simulated persistence read failure".to_owned()));
+            }
+            items.into_iter()
+        },
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.contains("simulated persistence read failure"));
+    assert_eq!(storage::read_blocks(&directory).unwrap(), before);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn recovery_snapshot_publishes_atomically_with_canonical_indexes_and_mempool() {
+    use kernel::{block::block_bytes, genesis::genesis_block};
+    let directory = std::env::temp_dir().join(format!(
+        "xparq-recovery-atomic-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let genesis = genesis_block().unwrap();
+    let block = storage::StoredCanonicalBlock {
+        height: 0,
+        hash: genesis.hash().unwrap().0,
+        bytes: block_bytes(&genesis).unwrap(),
+        transactions: vec![],
+        activities: vec![],
+    };
+    storage::replace_blocks_and_mempool_stream(
+        &directory,
+        || std::iter::once(Ok(block.clone())),
+        &[],
+    )
+    .unwrap();
+    // Storage treats snapshots as opaque local cache payloads; loading validates them.
+    storage::put_snapshot(&directory, 0, b"previous local cache").unwrap();
+    let bodies = storage::read_blocks(&directory).unwrap();
+    let checkpoint = storage::snapshots_descending(&directory).unwrap();
+    let indexes = storage::canonical_index_tip(&directory).unwrap();
+    let pending = vec![b"pending cache bytes".to_vec()];
+    assert!(
+        storage::replace_blocks_mempool_and_snapshot_stream(
+            &directory,
+            || std::iter::once(Ok(block.clone())),
+            &pending,
+            Some((1, b"wrong-height cache"))
+        )
+        .unwrap_err()
+        .contains("height does not match")
+    );
+    assert_eq!(storage::read_blocks(&directory).unwrap(), bodies);
+    assert_eq!(
+        storage::snapshots_descending(&directory).unwrap(),
+        checkpoint
+    );
+    assert_eq!(storage::canonical_index_tip(&directory).unwrap(), indexes);
+    assert!(storage::read_mempool(&directory).unwrap().is_empty());
+    storage::replace_blocks_mempool_and_snapshot_stream(
+        &directory,
+        || std::iter::once(Ok(block.clone())),
+        &pending,
+        Some((0, b"recovered local cache")),
+    )
+    .unwrap();
+    assert_eq!(storage::read_mempool(&directory).unwrap(), pending);
+    assert_eq!(
+        storage::snapshots_descending(&directory).unwrap(),
+        vec![(0, b"recovered local cache".to_vec())]
+    );
+    assert_eq!(
+        storage::canonical_index_tip(&directory).unwrap(),
+        Some((0, block.hash))
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}

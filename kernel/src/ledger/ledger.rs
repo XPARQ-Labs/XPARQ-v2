@@ -95,30 +95,76 @@ impl Ledger {
     }
 
     pub fn from_snapshot(snapshot: LedgerSnapshot, blocks: &[Block]) -> Result<Self, LedgerError> {
-        let genesis = blocks.first().ok_or(LedgerError::EmptyChain)?;
+        Self::restore_snapshot_blocks(
+            snapshot,
+            blocks.iter().cloned(),
+            usize::MAX,
+            usize::MAX,
+            false,
+        )
+    }
 
-        let tip = blocks.last().ok_or(LedgerError::EmptyChain)?;
+    /// Restore a local snapshot with streaming historical bodies and a bounded
+    /// resident cache. The supplied history must have been fully validated locally.
+    pub fn from_snapshot_with_body_cache(
+        snapshot: LedgerSnapshot,
+        blocks: impl IntoIterator<Item = Block>,
+        max_body_bytes: usize,
+        max_body_blocks: usize,
+    ) -> Result<Self, LedgerError> {
+        Self::restore_snapshot_blocks(snapshot, blocks, max_body_bytes, max_body_blocks, true)
+    }
+
+    fn restore_snapshot_blocks(
+        snapshot: LedgerSnapshot,
+        blocks: impl IntoIterator<Item = Block>,
+        max_body_bytes: usize,
+        max_body_blocks: usize,
+        verify_pow: bool,
+    ) -> Result<Self, LedgerError> {
+        let mut genesis_hash = None;
+        let mut tip = None;
+        let journal_start = snapshot
+            .journals
+            .first_key_value()
+            .map(|(height, _)| *height)
+            .ok_or(LedgerError::MissingRollbackJournal)?;
+        let mut retained_count = 0_usize;
 
         let mut chain = Chain::new();
 
         for block in blocks {
-            block.validate_structure().map_err(ConsensusError::from)?;
+            if verify_pow {
+                crate::consensus::validate_block_for_apply(&block, &chain)?;
+            } else {
+                block.validate_structure().map_err(ConsensusError::from)?;
+            }
 
+            if genesis_hash.is_none() {
+                genesis_hash = Some(block.hash()?);
+            }
+
+            tip = Some((block.height(), block.state_root()));
             chain.insert_block(block.clone())?;
+            chain.retain_recent_bodies(max_body_bytes, max_body_blocks)?;
 
             let expected_journals = usize::from(block.emission().is_some())
                 .checked_add(block.operations().len())
                 .ok_or(LedgerError::MissingRollbackJournal)?;
 
-            if snapshot.journals.get(&block.height()).map(Vec::len) != Some(expected_journals) {
-                return Err(LedgerError::MissingRollbackJournal);
+            if block.height() >= journal_start {
+                if snapshot.journals.get(&block.height()).map(Vec::len) != Some(expected_journals) {
+                    return Err(LedgerError::MissingRollbackJournal);
+                }
+                retained_count += 1;
             }
         }
 
-        if snapshot.journals.len() != blocks.len() {
+        if snapshot.journals.len() != retained_count {
             return Err(LedgerError::MissingRollbackJournal);
         }
 
+        let (tip_height, tip_root) = tip.ok_or(LedgerError::EmptyChain)?;
         let ledger = Self {
             applications: Default::default(),
             chain,
@@ -128,15 +174,20 @@ impl Ledger {
             journals: snapshot.journals,
 
             chain_context: Some(crate::common::ChainContext::new(
-                genesis.hash()?.into_bytes(),
+                genesis_hash.ok_or(LedgerError::EmptyChain)?.into_bytes(),
             )),
         };
 
         ledger.state.validate_supply_invariants()?;
 
         ledger.state.audit_coin_supply()?;
+        ledger
+            .state
+            .programs
+            .validate(tip_height)
+            .map_err(|_| LedgerError::InvalidProgramState)?;
 
-        if ledger.state_root()? != tip.state_root() {
+        if ledger.state_root()? != tip_root {
             return Err(LedgerError::InvalidStateRoot);
         }
 
@@ -166,7 +217,15 @@ impl Ledger {
     ) -> Option<Vec<crate::monetary::coin::Zeno>> {
         let block = self.chain.block(&height)?;
 
-        let journals = self.journals.get(&height)?;
+        self.program_call_protocol_burns_for_block(block)
+    }
+
+    /// Read receipts for a verified historical body supplied by a node store.
+    pub fn program_call_protocol_burns_for_block(&self, block: &Block) -> Option<Vec<Zeno>> {
+        if self.chain.header(&block.height()) != Some(&block.header) {
+            return None;
+        }
+        let journals = self.journals.get(&block.height())?;
 
         let offset = usize::from(block.emission().is_some());
 
@@ -369,6 +428,31 @@ impl Ledger {
         })
     }
 
+    /// Whether the shallow rollback fast path has all journals after this height.
+    pub fn can_rollback_to(&self, ancestor: Height) -> bool {
+        self.chain
+            .headers()
+            .rev()
+            .take_while(|(height, _)| **height > ancestor)
+            .all(|(height, _)| self.journals.contains_key(height))
+    }
+
+    /// Local undo metadata only; callers must retain a recovery path and receipts.
+    pub fn prune_rollback_journals_before(&mut self, height: Height) {
+        let height = self.tip_height().map_or(height, |tip| height.min(tip));
+        self.journals.retain(|key, _| *key >= height);
+    }
+
+    pub fn rollback_journal_heights(&self) -> impl Iterator<Item = Height> + '_ {
+        self.journals.keys().copied()
+    }
+
+    /// Test-only simulation of an expired local rollback journal.
+    #[cfg(feature = "devnet")]
+    pub fn discard_rollback_journals_before(&mut self, height: Height) {
+        self.journals.retain(|key, _| *key >= height);
+    }
+
     pub fn rollback_tip(&mut self) -> Result<Block, LedgerError> {
         let height = self.chain.tip_height().ok_or(LedgerError::EmptyChain)?;
 
@@ -399,10 +483,12 @@ impl Ledger {
         staged_state.validate_supply_invariants()?;
 
         let expected_root = match staged_chain.tip_height() {
-            Some(parent_height) => staged_chain
-                .block(&parent_height)
-                .ok_or(LedgerError::EmptyChain)?
-                .state_root(),
+            Some(parent_height) => {
+                staged_chain
+                    .header(&parent_height)
+                    .ok_or(LedgerError::EmptyChain)?
+                    .state_root
+            }
 
             None => StateRoot::ZERO,
         };
@@ -691,6 +777,8 @@ pub enum LedgerError {
 
     InvalidAssetState,
 
+    InvalidProgramState,
+
     BlockAccountingMismatch,
 
     AssetSupplyMismatch,
@@ -750,6 +838,7 @@ impl fmt::Display for LedgerError {
 
             Self::InvalidCoinState => formatter.write_str("coin state contains a zero-value UTXO"),
 
+            Self::InvalidProgramState => formatter.write_str("invalid program registry state"),
             Self::InvalidAssetState => {
                 formatter.write_str("asset state contains invalid metadata or a zero-value share")
             }
@@ -852,7 +941,7 @@ mod p3e_block_atomicity_tests {
         use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
 
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x71; 32]));
-        let owner = address_from_public_key(&seed.public_key());
+        let owner = address_from_public_key(&seed.public_key()).unwrap();
         let mut ledger = genesis::genesis_ledger().unwrap();
         commit_empty_block(&mut ledger, owner);
         let before = ledger_bytes(&ledger);
@@ -868,7 +957,7 @@ mod p3e_block_atomicity_tests {
         let deploy = DeployProgram {
             owner,
             nonce: 1,
-            code,
+            code: code.into(),
         };
         let draft_payment = CoinTransition::coin_with_charges(
             owner,
@@ -1005,6 +1094,47 @@ mod p3e_block_atomicity_tests {
         assert!(matches!(result, Err(LedgerError::BlockAccountingMismatch)));
 
         assert_eq!(ledger_bytes(&ledger), before);
+    }
+
+    #[test]
+    fn pruned_snapshot_requires_a_complete_contiguous_journal_suffix() {
+        let mut ledger = genesis::genesis_ledger().unwrap();
+        for _ in 0..3 {
+            commit_empty_block(&mut ledger, crypto::Address::ZERO);
+        }
+        let blocks = ledger.chain.blocks().cloned().collect::<Vec<_>>();
+        let full = ledger.snapshot();
+        let root = ledger.state_root().unwrap();
+        ledger.prune_rollback_journals_before(Height(2));
+        assert_eq!(ledger.state_root().unwrap(), root);
+        let compact = ledger.snapshot();
+        let mut restored = Ledger::from_snapshot(compact.clone(), &blocks).unwrap();
+        assert!(restored.can_rollback_to(Height(1)));
+        assert!(!restored.can_rollback_to(Height(0)));
+        restored.rollback_tip().unwrap();
+        restored.rollback_tip().unwrap();
+        let unchanged = ledger_bytes(&restored);
+        assert!(matches!(
+            restored.rollback_tip().unwrap_err(),
+            LedgerError::MissingRollbackJournal
+        ));
+        assert_eq!(ledger_bytes(&restored), unchanged);
+        let mut hole = full;
+        hole.journals.remove(&Height(2));
+        let mut missing_tip = compact.clone();
+        missing_tip.journals.remove(&Height(3));
+        let mut extra = compact.clone();
+        extra.journals.insert(Height(9), vec![]);
+        let mut wrong_count = compact.clone();
+        wrong_count.journals.get_mut(&Height(2)).unwrap().clear();
+        let mut empty = compact;
+        empty.journals.clear();
+        for invalid in [hole, missing_tip, extra, wrong_count, empty] {
+            assert!(matches!(
+                Ledger::from_snapshot(invalid, &blocks).unwrap_err(),
+                LedgerError::MissingRollbackJournal
+            ));
+        }
     }
 
     fn empty_next_candidate(ledger: &Ledger, miner: crypto::Address) -> Block {
@@ -1522,7 +1652,7 @@ mod p3e_block_atomicity_tests {
 
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([24; 32]));
 
-        let signer = address_from_public_key(&seed.public_key());
+        let signer = address_from_public_key(&seed.public_key()).unwrap();
 
         let miner = crypto::Address([0x82; crypto::ADDRESS_SIZE]);
 
@@ -1673,6 +1803,27 @@ mod p3e_block_atomicity_tests {
         let snapshot =
             LedgerSnapshot::try_from_slice(&borsh::to_vec(&ledger.snapshot()).unwrap()).unwrap();
 
+        let mut invalid_snapshot = snapshot.clone();
+        let mut code = b"XPVM".to_vec();
+        code.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0, 0]);
+        code.push(1);
+        code.extend_from_slice(&7_u64.to_le_bytes());
+        code.push(3);
+        crate::program::deploy_program(
+            &mut invalid_snapshot.state.programs,
+            crate::program::DeployProgram {
+                owner: signer,
+                nonce: 1,
+                code: code.into(),
+            },
+            Height(ledger.tip_height().unwrap().0 + 1),
+        )
+        .unwrap();
+        assert!(matches!(
+            Ledger::from_snapshot(invalid_snapshot, &blocks),
+            Err(LedgerError::InvalidProgramState)
+        ));
+
         let mut recovered = Ledger::from_snapshot(snapshot, &blocks).unwrap();
 
         assert_eq!(recovered, ledger);
@@ -1740,7 +1891,7 @@ mod p3e_block_atomicity_tests {
         };
 
         fn commit_call(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) {
-            let signer = address_from_public_key(&seed.public_key());
+            let signer = address_from_public_key(&seed.public_key()).unwrap();
 
             let chain = ledger.chain_context.unwrap();
 
@@ -1876,7 +2027,7 @@ mod p3e_block_atomicity_tests {
 
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([25; 32]));
 
-        let signer = address_from_public_key(&seed.public_key());
+        let signer = address_from_public_key(&seed.public_key()).unwrap();
 
         let mut ledger = genesis::genesis_ledger().unwrap();
 

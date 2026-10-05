@@ -115,7 +115,8 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
     let owner_address = address_to_string(&owner.address);
     let recipient = address_from_public_key(
         &SigningSeed::new(Signature::MlDsa44, Box::new([72; 32])).public_key(),
-    );
+    )
+    .unwrap();
     let recipient_address = address_to_string(&recipient);
     mine(&a, 1);
     let mut an = start_node(&a, &ap, &ar, &[], None);

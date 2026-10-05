@@ -21,7 +21,7 @@ mod payment_tests {
     #[test]
     fn payment_requires_exact_burn_and_binds_call_without_mutating_state() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([19; 32]));
-        let signer = address_from_public_key(&seed.public_key());
+        let signer = address_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([7; 32]);
         let input = CoinShare::from_bytes([2; crypto::HASH16_SIZE]);
         let call = ProgramCall {
@@ -176,8 +176,15 @@ mod xpq_transfer_tests {
     use crypto::{Signature, SigningSeed, address_from_public_key};
 
     fn fixture() -> (LedgerState, AuthorizedProgramInvocation, ChainContext) {
-        let keys = SigningSeed::new(Signature::MlDsa44, Box::new([91; 32]));
-        let owner = address_from_public_key(&keys.public_key());
+        fixture_for_scheme(Signature::MlDsa44, Address([94; crypto::ADDRESS_SIZE]))
+    }
+
+    fn fixture_for_scheme(
+        scheme: Signature,
+        recipient: Address,
+    ) -> (LedgerState, AuthorizedProgramInvocation, ChainContext) {
+        let keys = SigningSeed::new(scheme, Box::new([91; 32]));
+        let owner = address_from_public_key(&keys.public_key()).unwrap();
         let input = CoinShare::from_bytes([92; crypto::HASH16_SIZE]);
         let amount = 1_000_000;
         let mut state = LedgerState::default();
@@ -213,7 +220,7 @@ mod xpq_transfer_tests {
                 owner,
                 vec![input],
                 vec![CoinOutput::new(
-                    Address([94; crypto::ADDRESS_SIZE]),
+                    recipient,
                     Zeno::from_zeno(amount - burn - fee),
                 )],
                 CoinCharges::new(Zeno::from_zeno(fee)),
@@ -287,6 +294,118 @@ mod xpq_transfer_tests {
                 .is_err()
         );
         assert_eq!(state, after);
+    }
+
+    #[test]
+    fn xpq_transfer_rejects_every_cross_scheme_authorization() {
+        for owner_scheme in crypto::AccountSignatureScheme::ALL {
+            let (mut state, tx, chain) =
+                fixture_for_scheme(owner_scheme, Address([94; crypto::ADDRESS_SIZE]));
+            validate_consensus_call(tx.clone(), chain, 1, &state).unwrap();
+            let before = state.clone();
+            for attacker_scheme in crypto::AccountSignatureScheme::ALL {
+                if attacker_scheme == owner_scheme {
+                    continue;
+                }
+                let keys = SigningSeed::new(attacker_scheme, Box::new([91; 32]));
+                let attacker = address_from_public_key(&keys.public_key()).unwrap();
+                assert_ne!(attacker, tx.signer);
+                let mut forged = tx.clone();
+                let commitment = program_invocation_commitment(
+                    forged.signer,
+                    &forged.call,
+                    &forged.payment,
+                    chain,
+                )
+                .unwrap();
+                forged.authorization = AccountAuthorization {
+                    public_key: keys.public_key(),
+                    signature: keys.sign(commitment.as_bytes()),
+                };
+                // The signature is valid; the ownership commitment is wrong.
+                assert!(crypto::verify(
+                    &forged.authorization.public_key,
+                    commitment.as_bytes(),
+                    &forged.authorization.signature,
+                ));
+                assert!(matches!(
+                    validate_consensus_call(forged.clone(), chain, 1, &state),
+                    Err(crate::consensus::ProgramConsensusError::InvalidAuthorization)
+                ));
+                assert!(
+                    state
+                        .apply_program_call(forged, Address([95; crypto::ADDRESS_SIZE]), chain, 1,)
+                        .is_err()
+                );
+                assert_eq!(state, before);
+
+                // Changing the signer cannot change the owner stored in the ledger.
+                let mut rewritten = tx.clone();
+                rewritten.signer = attacker;
+                rewritten.payment.signer = attacker;
+                let commitment = program_invocation_commitment(
+                    attacker,
+                    &rewritten.call,
+                    &rewritten.payment,
+                    chain,
+                )
+                .unwrap();
+                rewritten.authorization = AccountAuthorization {
+                    public_key: keys.public_key(),
+                    signature: keys.sign(commitment.as_bytes()),
+                };
+                assert!(rewritten.verify_authorizations(chain, 1).unwrap());
+                assert!(matches!(
+                    validate_consensus_call(rewritten.clone(), chain, 1, &state),
+                    Err(crate::consensus::ProgramConsensusError::RecipientMismatch)
+                ));
+                assert!(
+                    state
+                        .apply_program_call(
+                            rewritten,
+                            Address([95; crypto::ADDRESS_SIZE]),
+                            chain,
+                            1,
+                        )
+                        .is_err()
+                );
+                assert_eq!(state, before);
+            }
+        }
+    }
+
+    #[test]
+    fn xpq_transfer_can_create_an_owner_with_a_different_scheme() {
+        let recipient_keys = SigningSeed::new(Signature::MlDsa65, Box::new([99; 32]));
+        let recipient = address_from_public_key(&recipient_keys.public_key()).unwrap();
+        let (mut state, tx, chain) = fixture_for_scheme(Signature::MlDsa44, recipient);
+        let input = tx.payment.coin_parts().unwrap().0[0];
+        let amount = tx.payment.coin_parts().unwrap().1[0].amount;
+        validate_consensus_call(tx.clone(), chain, 1, &state).unwrap();
+        state
+            .apply_program_call(tx, Address([95; crypto::ADDRESS_SIZE]), chain, 1)
+            .unwrap();
+        assert!(state.utxos.coin(&input).is_none());
+        let transferred: Vec<_> = state
+            .utxos
+            .coins()
+            .filter(|(_, coin)| coin.owner == recipient)
+            .collect();
+        assert_eq!(transferred.len(), 1);
+        assert_eq!(transferred[0].1.amount, amount);
+        let commitment =
+            crate::program::AuthorizationCommitment::from_bytes([98; crypto::HASH_SIZE]);
+        let authorization = AccountAuthorization {
+            public_key: recipient_keys.public_key(),
+            signature: recipient_keys.sign(commitment.as_bytes()),
+        };
+        assert!(authorization.verify_commitment(recipient, &commitment, 1));
+        let old_keys = SigningSeed::new(Signature::MlDsa44, Box::new([91; 32]));
+        let old_authorization = AccountAuthorization {
+            public_key: old_keys.public_key(),
+            signature: old_keys.sign(commitment.as_bytes()),
+        };
+        assert!(!old_authorization.verify_commitment(recipient, &commitment, 1));
     }
 
     #[test]

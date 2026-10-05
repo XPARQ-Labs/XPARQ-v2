@@ -1,5 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
+use std::io::Read;
+use std::sync::Arc;
 
 use crate::common::Height;
 
@@ -7,11 +9,22 @@ use super::registry::{ProgramHash, ProgramId, ProgramRecord, ProgramRegistry, Re
 
 pub const MAX_PROGRAM_CODE_SIZE: usize = 1_048_576;
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct DeployProgram {
     pub owner: Address,
     pub nonce: u64,
-    pub code: Vec<u8>,
+    /// Shared code bytes; canonical encoding remains the historical Vec encoding.
+    pub code: Arc<Vec<u8>>,
+}
+
+impl BorshDeserialize for DeployProgram {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            owner: Address::deserialize_reader(reader)?,
+            nonce: u64::deserialize_reader(reader)?,
+            code: super::deserialize_program_code(reader)?.into(),
+        })
+    }
 }
 
 impl DeployProgram {
@@ -46,6 +59,20 @@ pub fn deploy_program(
     deploy: DeployProgram,
     height: Height,
 ) -> Result<(ProgramId, ProgramJournal), DeployError> {
+    let (program_id, record) = prepare_deployment(deploy, height)?;
+
+    registry
+        .insert(program_id, record)
+        .map_err(DeployError::Registry)?;
+
+    Ok((program_id, ProgramJournal::Deploy { program_id }))
+}
+
+/// Prepare one record without cloning or serializing the existing registry.
+pub(crate) fn prepare_deployment(
+    deploy: DeployProgram,
+    height: Height,
+) -> Result<(ProgramId, ProgramRecord), DeployError> {
     deploy.validate_structure()?;
 
     let code_hash = ProgramHash::derive(&deploy.code).map_err(DeployError::Registry)?;
@@ -62,11 +89,7 @@ pub fn deploy_program(
         state_value: 0,
     };
 
-    registry
-        .insert(program_id, record)
-        .map_err(DeployError::Registry)?;
-
-    Ok((program_id, ProgramJournal::Deploy { program_id }))
+    Ok((program_id, record))
 }
 
 pub fn rollback_program(
@@ -130,7 +153,7 @@ mod tests {
             DeployProgram {
                 owner: Address::ZERO,
                 nonce: 1,
-                code: valid_code(1),
+                code: valid_code(1).into(),
             },
             Height(1),
         )
@@ -156,7 +179,7 @@ fn duplicate_program_deployment_is_rejected() {
     let deploy = DeployProgram {
         owner: Address::ZERO,
         nonce: 1,
-        code: valid_code(1),
+        code: valid_code(1).into(),
     };
 
     let (first_id, _) = deploy_program(&mut registry, deploy.clone(), Height(1)).unwrap();
@@ -181,7 +204,7 @@ fn empty_program_is_rejected() {
         DeployProgram {
             owner: Address::ZERO,
             nonce: 1,
-            code: vec![],
+            code: vec![].into(),
         },
         Height(1),
     );
@@ -199,7 +222,7 @@ fn oversized_program_is_rejected() {
         DeployProgram {
             owner: Address::ZERO,
             nonce: 1,
-            code: vec![0; MAX_PROGRAM_CODE_SIZE + 1],
+            code: vec![0; MAX_PROGRAM_CODE_SIZE + 1].into(),
         },
         Height(1),
     );
@@ -217,7 +240,7 @@ fn different_deploys_produce_different_program_ids() {
         DeployProgram {
             owner: Address::ZERO,
             nonce: 1,
-            code: valid_code(1),
+            code: valid_code(1).into(),
         },
         Height(1),
     )
@@ -228,7 +251,7 @@ fn different_deploys_produce_different_program_ids() {
         DeployProgram {
             owner: Address::ZERO,
             nonce: 2,
-            code: valid_code(2),
+            code: valid_code(2).into(),
         },
         Height(2),
     )

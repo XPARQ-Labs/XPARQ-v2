@@ -50,7 +50,16 @@ Set `WALLET_BIN` if the executable is in another location. Relative bytecode
 and wallet paths are resolved from the directory where the script is invoked.
 
 Bytecode format: [XPVM](../docs/XPVM.md).
-A generic VM-call CLI is not available yet; use the `sign_program_call` library API.
+Call a confirmed deployment with:
+
+```bash
+./target/release/wallet program-call --program-id PROGRAM_ID --wallet "$WALLET_FILE" --rpc "$RPC_ADDR"
+```
+
+## Persistent counter
+
+The [counter example](counter/README.md) includes bytecode and scripts to deploy
+and increment a value stored in program state. It works with XPVM v1.
 
 ## Staking
 

@@ -72,7 +72,7 @@ fn signed_spend(
     seed: &SigningSeed,
     chain: crate::common::ChainContext,
 ) -> AuthorizedProgramEnvelope {
-    let signer = address_from_public_key(&seed.public_key());
+    let signer = address_from_public_key(&seed.public_key()).unwrap();
     let call = crate::program::system::coin_program::transfer_call();
     let commitment = program_invocation_commitment(signer, &call, &intent, chain).unwrap();
     AuthorizedProgramEnvelope::Program(Box::new(AuthorizedProgramInvocation {
@@ -87,7 +87,7 @@ fn signed_spend(
 }
 
 fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> Block {
-    let signer = address_from_public_key(&seed.public_key());
+    let signer = address_from_public_key(&seed.public_key()).unwrap();
     let chain = ledger.chain_context.unwrap();
     let (opcode, payload) = match &call {
         AssetCall::Register(v) => (AssetOpcode::Register, borsh::to_vec(v).unwrap()),
@@ -169,7 +169,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
 fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
     let mut vectors = Vec::new();
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x24; 32]));
-    let owner = address_from_public_key(&seed.public_key());
+    let owner = address_from_public_key(&seed.public_key()).unwrap();
     let recipient = Address([0x35; crypto::ADDRESS_SIZE]);
     let other_miner = Address([0x46; crypto::ADDRESS_SIZE]);
     let chain = genesis::chain_context().unwrap();

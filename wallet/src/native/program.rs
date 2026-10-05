@@ -108,9 +108,24 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
     let growth = quote["created_state_weight"]
         .as_u64()
         .ok_or("invalid program quote response")?;
+    let vm_fuel = if call.program == SystemProgramId::VM {
+        quote["vm_fuel"]
+            .as_u64()
+            .filter(|fuel| *fuel <= kernel::program::vm::MAX_CALL_FUEL)
+            .ok_or("invalid or missing VM fuel quote; use a node supporting VM quotes")?
+    } else {
+        0
+    };
     let transaction = automatic_fee_transaction(|fee, archival| {
-        let (inputs, _, _, change) =
-            select_account_inputs_with_state_burn(rpc, wallet, fee, 1, growth, archival)?;
+        let (inputs, _, _, change) = select_account_inputs_with_state_burn(
+            rpc,
+            wallet,
+            fee.checked_add(vm_fuel)
+                .ok_or("fee plus VM fuel burn overflow")?,
+            1,
+            growth,
+            archival,
+        )?;
         let outputs = if change > 0 {
             vec![CoinOutput::new(wallet.address(), Zeno::from_zeno(change))]
         } else {
@@ -164,11 +179,13 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
             | "program-transfer"
             | "program-burn"
             | "program-consolidate"
+            | "program-call"
     ) {
         return Err(format!("unknown program command {command}"));
     }
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let call = match command {
+        "program-call" => vm_call(args)?,
         "program-register" => {
             let name = normalize_asset_name(option(args, "--name").ok_or("missing --name")?)?;
             let max_supply = amount(args, "--max-supply")?;
@@ -269,6 +286,44 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         _ => unreachable!(),
     };
     submit(args, &wallet, call)
+}
+
+fn vm_call(args: &[String]) -> Result<ProgramCall, String> {
+    let value = option(args, "--program-id").ok_or("missing --program-id")?;
+    if value.len() != 64 {
+        return Err("program id must contain exactly 64 hexadecimal characters".into());
+    }
+    let payload = hex::decode(value).map_err(|_| "invalid hexadecimal program id")?;
+    Ok(ProgramCall {
+        program: SystemProgramId::VM,
+        opcode: 0,
+        payload,
+    })
+}
+
+#[cfg(test)]
+mod vm_call_tests {
+    use super::*;
+
+    #[test]
+    fn vm_call_uses_exact_program_id_and_rejects_invalid_ids() {
+        let id = "a7".repeat(32);
+        let call = vm_call(&["--program-id".into(), id.clone()]).unwrap();
+        assert_eq!(call.program, SystemProgramId::VM);
+        assert_eq!(call.opcode, 0);
+        assert_eq!(call.payload, vec![0xa7; 32]);
+        assert!(extension::script::execute::decode_program(&call).is_ok());
+        for value in [
+            "".to_string(),
+            "ab".repeat(31),
+            "ab".repeat(33),
+            "zz".repeat(32),
+            format!("0x{id}"),
+        ] {
+            assert!(vm_call(&["--program-id".into(), value]).is_err());
+        }
+        assert!(vm_call(&[]).is_err());
+    }
 }
 
 pub(super) fn normalize_asset_name(name: &str) -> Result<String, String> {

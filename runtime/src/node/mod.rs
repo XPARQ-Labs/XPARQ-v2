@@ -23,7 +23,7 @@ use kernel::{
     codec::{block_bytes, decode_block},
     common::{Height, Nonce},
     consensus::{
-        ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
+        Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory,
     },
     crypto::{
@@ -103,6 +103,7 @@ const INVALID_POW_ERROR_PREFIX: &str = "peer-invalid-pow:";
 const GOSSIP_RESYNC_PREFIX: &str = "gossip-resync:";
 const DEFAULT_NAT_LEASE: Duration = Duration::from_secs(3_600);
 
+#[derive(Clone)]
 struct HeaderSyncResult {
     ancestor_height: Height,
     ancestor_hash: BlockHash,
@@ -137,6 +138,10 @@ struct RunConfig {
     nat_traversal: bool,
     #[cfg(feature = "litep2p-devnet")]
     litep2p: bool,
+    #[cfg(feature = "litep2p-devnet")]
+    staging_bytes: u64,
+    #[cfg(feature = "litep2p-devnet")]
+    private_discovery: bool,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
@@ -184,18 +189,30 @@ struct HttpRequest {
 }
 
 mod chain_sync;
+mod recovery;
+mod journal;
 mod config;
 mod explorer;
 mod gossip;
+#[cfg(feature = "litep2p-devnet")]
+mod inbound_budget;
+#[cfg(feature = "litep2p-devnet")]
+mod request_queue;
+#[cfg(feature = "litep2p-devnet")]
+mod response_budget;
 mod index;
 #[cfg(feature = "litep2p-devnet")]
 mod litep2p_devnet;
+#[cfg(feature = "litep2p-devnet")]
+mod litep2p_peers;
 mod mempool;
 mod mining;
 mod p2p;
 mod protocol;
 mod rpc;
 mod state;
+#[cfg(feature = "litep2p-devnet")]
+mod sync_stage;
 mod util;
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
@@ -306,7 +323,14 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
     }
     #[cfg(feature = "litep2p-devnet")]
     if config.litep2p {
-        return litep2p_devnet::run_database(config.database, &config.p2p_listen, &config.peers);
+        return litep2p_devnet::run_database(
+            config.database,
+            &config.p2p_listen,
+            &config.peers,
+            config.staging_bytes,
+            config.public_addr,
+            config.private_discovery,
+        );
     }
     p2p::serve_p2p_database(config.database, &config.p2p_listen)
 }

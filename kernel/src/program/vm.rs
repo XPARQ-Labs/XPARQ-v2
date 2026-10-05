@@ -299,7 +299,7 @@ mod tests {
             DeployProgram {
                 owner: crypto::Address::ZERO,
                 nonce: 1,
-                code,
+                code: code.into(),
             },
             Height(1),
         )
@@ -319,18 +319,13 @@ mod tests {
             program::{DeployProgram, ProgramJournal, deploy_program},
         };
         let mut state = LedgerState::default();
-        let mut code = b"XPVM".to_vec();
-        code.extend_from_slice(&[1, 2, 0, 0, 0, 0, 0, 0, 0]);
-        code.push(0x04);
-        code.push(0x01);
-        code.extend_from_slice(&1i64.to_le_bytes());
-        code.extend_from_slice(&[0x02, 0x05, 0x04, 0x03]);
+        let code = include_bytes!("../../../examples/counter/counter.xpvm").to_vec();
         let (id, _) = deploy_program(
             &mut state.programs,
             DeployProgram {
                 owner: crypto::Address::ZERO,
                 nonce: 1,
-                code,
+                code: code.into(),
             },
             Height(1),
         )
@@ -356,6 +351,19 @@ mod tests {
                 .proposed_effect,
             Some(VmEffect::ProgramState(2))
         );
+        let restored = <ProgramRegistry as borsh::BorshDeserialize>::try_from_slice(
+            &borsh::to_vec(&state.programs).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(execute_registered(&restored, id, 12).unwrap().value, 2);
+        let mut overflow = state.programs.clone();
+        overflow.set_state(id, i64::MAX).unwrap();
+        let unchanged = overflow.clone();
+        assert_eq!(
+            execute_registered(&overflow, id, 12),
+            Err(ExecutionError::ArithmeticOverflow)
+        );
+        assert_eq!(overflow, unchanged);
         state
             .rollback_state(StateRollbackJournal {
                 coin: None,

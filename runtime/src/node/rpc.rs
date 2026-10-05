@@ -156,6 +156,20 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         {
             return Err("invalid quote authorization".into());
         }
+        let vm_fuel = match kernel::program::system::script::execute::decode_program(&tx.call)
+            .map_err(|e| format!("invalid program call: {e:?}"))?
+        {
+            kernel::program::system::script::execute::DecodedProgramCall::Vm(id) => {
+                kernel::program::vm::execute_registered(
+                    &ledger.state().programs,
+                    kernel::program::ProgramId::from_bytes(id),
+                    kernel::program::vm::MAX_CALL_FUEL,
+                )
+                .map_err(|e| format!("VM quote failed: {e:?}"))?
+                .fuel_used
+            }
+            _ => 0,
+        };
         let weight = kernel::program::program_created_state_weight_with_applications(
             &tx,
             chain,
@@ -167,7 +181,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             stream,
             200,
             &serde_json::json!({
-                "created_state_weight":weight, "tip_hash": ledger.tip_hash().map(|h|hex::encode(h.0)),
+                "created_state_weight":weight, "vm_fuel":vm_fuel, "tip_hash": ledger.tip_hash().map(|h|hex::encode(h.0)),
             }),
         );
     }
@@ -206,7 +220,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 "miner_protocol_burn": kernel::consensus::MINER_PROTOCOL_BURN.as_zeno(),
             })
         }
-        "/blocks/latest" => latest_blocks_response(&ledger)?,
+        "/blocks/latest" => latest_blocks_response(database, &ledger)?,
         route if route.starts_with("/coin-origin/") => {
             let share = route.trim_start_matches("/coin-origin/");
             if share.is_empty() || share.contains(['/', '?', '#']) {
@@ -243,12 +257,10 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 .trim_start_matches("/block/")
                 .parse::<u64>()
                 .map_err(|_| "invalid block height")?;
-            block_response(
+            stored_block_response(
+                database,
                 &ledger,
-                ledger
-                    .chain
-                    .block(&Height(height))
-                    .ok_or("block was not found")?,
+                &canonical_block(database, &ledger, Height(height))?,
             )?
         }
         route if route.starts_with("/account/") => {

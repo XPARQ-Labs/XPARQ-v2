@@ -55,6 +55,6 @@ pub(super) fn print_help() {
         "\nProgram asset commands:\nwallet program-register --name NAME --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-mint --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-transfer --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-burn --asset CONTRACT --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-consolidate --asset CONTRACT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-info --asset CONTRACT [--rpc ADDRESS]\nwallet program-balance --asset CONTRACT [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts have 8 decimals. XPQ inputs, change, miner fee and protocol burn are calculated automatically. --offline prints a signed transaction but still needs RPC for inputs and fee quote. Wait for confirmation before dependent operations."
     );
     println!(
-        "\nBytecode deployment:\nwallet program-deploy --code PROGRAM.xpvm --nonce NONCE [--wallet PATH] [--rpc ADDRESS] [--offline]"
+        "\nBytecode deployment and execution:\nwallet program-deploy --code PROGRAM.xpvm --nonce NONCE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-call --program-id HEX_ID [--wallet PATH] [--rpc ADDRESS] [--offline]"
     );
 }

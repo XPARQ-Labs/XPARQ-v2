@@ -5,6 +5,8 @@ pub enum CryptoError {
     InvalidAddressEncoding,
     InvalidKeyDerivationParameters,
     InvalidPublicKey,
+    InvalidPublicKeyLength,
+    InvalidAccountScheme,
     InvalidSignatureEncoding,
     InvalidPoWParameters,
     PoWHashFailed,
@@ -18,6 +20,10 @@ impl fmt::Display for CryptoError {
             Self::InvalidKeyDerivationParameters => {
                 f.write_str("key derivation parameters are invalid")
             }
+            Self::InvalidPublicKeyLength => {
+                f.write_str("public key length does not match account scheme")
+            }
+            Self::InvalidAccountScheme => f.write_str("account scheme identifier is invalid"),
             Self::InvalidPublicKey => f.write_str("public key bytes are invalid"),
             Self::InvalidSignatureEncoding => {
                 #[cfg(feature = "sqisign-blockchain-test")]

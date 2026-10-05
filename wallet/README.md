@@ -96,8 +96,18 @@ bytecode. Choose an unused nonce for the deploying owner.
 The wallet obtains a deploy quote, selects XPQ funding, signs and submits to
 `/program/deploy`. `--offline` prints signed bytes instead of submitting; RPC is
 still required for funding and the quote. See [XPVM v1](../docs/XPVM.md) for the
-bytecode format. A generic VM-call CLI is not yet available; the library supports
-constructing a VM ProgramCall with `sign_program_call`.
+bytecode format. To execute a deployed program after deployment is confirmed:
+
+```sh
+./target/release/wallet program-call --program-id PROGRAM_ID --wallet wallet.json --rpc 127.0.0.1:6666
+```
+
+The ID must contain exactly 64 hexadecimal characters. The command signs a VM
+call with opcode 0 and the program ID as payload, quotes state growth, selects
+funding, and calculates burn and miner fees. `--offline` prints signed bytes
+and still requires RPC. It returns a transaction hash on submission; wait for
+confirmation before sending another call using the same wallet inputs.
+See the [counter example](../examples/counter/README.md).
 
 ### Integration verification
 

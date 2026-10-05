@@ -16,7 +16,8 @@ fn genesis_rpc_preserves_block_hash_and_empty_transaction_hashes() {
     assert_eq!(response["transaction_hashes"], serde_json::json!([]));
     assert_eq!(response["transactions"], 0);
     assert_eq!(
-        latest_blocks_response(&ledger).unwrap()["blocks"][0],
+        latest_blocks_response(Path::new("unused-genesis-body-is-resident"), &ledger).unwrap()["blocks"]
+            [0],
         response
     );
 }
@@ -357,7 +358,7 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     let genesis = kernel::genesis::genesis_block().unwrap();
     let genesis_hash = genesis.hash().unwrap();
     let target_bits = expected_next_difficulty(&load_existing(&database).unwrap().chain).unwrap();
-    let alternative_one = Block::from_protocol_operations(
+    let mut alternative_one = Block::from_protocol_operations(
         Height(1),
         genesis_hash,
         target_bits,
@@ -369,6 +370,19 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
         vec![],
     )
     .unwrap();
+    // Mine the negative fixture so random PoW failure cannot mask root rejection.
+    assert!(
+        crate::miner::mine_range(
+            &mut alternative_one,
+            crate::miner::MiningRange {
+                start_nonce: 0,
+                attempts: 1000
+            },
+            &mut memory,
+        )
+        .unwrap()
+        .is_some()
+    );
     let alternative_two = Block::from_protocol_operations(
         Height(2),
         alternative_one.hash().unwrap(),
@@ -499,6 +513,24 @@ fn failed_reorg_after_applying_alternative_block_keeps_database_and_cache() {
         peer_weight: u64::MAX,
         preferred: true,
     };
+    let read_error = apply_verified_branch_stream(
+        &database,
+        sync.clone(),
+        [
+            Ok(first.clone()),
+            Err("simulated staging read failure".into()),
+        ]
+        .into_iter(),
+    )
+    .expect_err("staging read failed after a valid alternative block");
+    assert!(read_error.contains("staging read failure"));
+    assert_eq!(
+        crate::storage::read_blocks(&database).unwrap(),
+        stored_before
+    );
+    let cached = load_or_initialize_owned(&database).unwrap();
+    assert_eq!(cached.tip_hash(), original_tip);
+    assert_eq!(cached.state_root().unwrap(), original_root);
     let error = apply_verified_branch(&database, sync, vec![first, second])
         .expect_err("second alternative block has an invalid state root");
     assert!(error.contains("state root"), "{error}");
@@ -1636,7 +1668,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
     };
     let database = test_database("deploy-operation");
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x71; 32]));
-    let owner = address_from_public_key(&seed.public_key());
+    let owner = address_from_public_key(&seed.public_key()).unwrap();
     let mut memory = new_pow_memory();
     let mut nonce = 0;
     loop {
@@ -1661,7 +1693,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
     let deploy = DeployProgram {
         owner,
         nonce: 1,
-        code,
+        code: code.into(),
     };
     let chain = kernel::genesis::chain_context().unwrap();
     let height = Height(2);
@@ -1720,6 +1752,54 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
     assert_eq!(response["transactions"], 0);
     assert_eq!(response["operation_details"][0]["type"], "deploy_program");
     assert!(read_pending_operations(&database).unwrap().is_empty());
+    let old_block = replayed.chain.block(&Height(2)).unwrap().clone();
+    let expected_burns = replayed
+        .program_call_protocol_burns_for_block(&old_block)
+        .unwrap();
+    let mut pruned = replayed.clone();
+    super::journal::copy_receipt(&database, &database, &pruned, &old_block).unwrap();
+    let mut next_block = super::mining::candidate_operation_block(&pruned, owner, vec![]).unwrap();
+    crate::miner::mine_range(
+        &mut next_block,
+        crate::miner::MiningRange {
+            start_nonce: 0,
+            attempts: 1000,
+        },
+        &mut memory,
+    )
+    .unwrap()
+    .unwrap();
+    apply_block(&mut pruned, next_block.clone()).unwrap();
+    persist_block_and_pending(&database, &next_block, &[]).unwrap();
+    let blocked = test_database("journal-archive-blocked");
+    fs::write(&blocked, b"not a database directory").unwrap();
+    let root_before = pruned.state_root().unwrap();
+    let journals_before = pruned.rollback_journal_heights().count();
+    super::journal::prune_journals_with_window(&blocked, &mut pruned, 1).unwrap();
+    assert_eq!(pruned.rollback_journal_heights().count(), journals_before);
+    assert_eq!(pruned.state_root().unwrap(), root_before);
+    fs::remove_file(blocked).unwrap();
+    super::journal::prune_journals_with_window(&database, &mut pruned, 1).unwrap();
+    assert!(
+        pruned
+            .program_call_protocol_burns_for_block(&old_block)
+            .is_none()
+    );
+    assert_eq!(
+        super::journal::protocol_burns(&database, &pruned, &old_block).unwrap(),
+        expected_burns
+    );
+    assert_eq!(
+        stored_block_response(&database, &pruned, &old_block).unwrap(),
+        response
+    );
+    crate::snapshot::write(&database, &pruned).unwrap();
+    let restored = load_existing(&database).unwrap();
+    assert_eq!(restored.rollback_journal_heights().count(), 1);
+    assert_eq!(
+        stored_block_response(&database, &restored, &old_block).unwrap(),
+        response
+    );
     fs::remove_dir_all(database).unwrap();
 }
 
@@ -1733,4 +1813,621 @@ fn startup_discards_invalid_redb_mempool_entries() {
 
     assert!(read_mempool(&database).unwrap().is_empty());
     fs::remove_dir_all(database).unwrap();
+}
+
+#[test]
+fn disk_body_eviction_preserves_headers_rpc_restart_and_deep_reorg() {
+    let database = test_database("disk-body-eviction");
+    let miner = Address([0xd1; kernel::crypto::ADDRESS_SIZE]);
+    let mut memory = new_pow_memory();
+    let mut canonical = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+        let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
+        assert!(
+            crate::miner::mine_range(
+                &mut block,
+                crate::miner::MiningRange {
+                    start_nonce: 0,
+                    attempts: 1000,
+                },
+                memory
+            )
+            .unwrap()
+            .is_some()
+        );
+        apply_block(ledger, block.clone()).unwrap();
+        block
+    }
+    for _ in 0..3 {
+        extend(&mut canonical, miner, &mut memory);
+    }
+    persist_chain_and_pending(&database, &canonical, &[]).unwrap();
+    let pinned_reader = crate::storage::CanonicalBodyReader::new(&database).unwrap();
+    let original_tip = canonical.tip_hash();
+    let old = canonical.chain.block(&Height(1)).unwrap().clone();
+    let expected = block_response(&canonical, &old).unwrap();
+    let mut damaged = old.clone();
+    damaged.body_mut().emission.as_mut().unwrap().to =
+        Address([0xff; kernel::crypto::ADDRESS_SIZE]);
+    assert!(
+        decode_pinned_local_body(Height(1), &old.header, &block_bytes(&damaged).unwrap())
+            .unwrap_err()
+            .contains("Merkle commitment")
+    );
+    assert!(decode_pinned_local_body(Height(2), &old.header, &block_bytes(&old).unwrap()).is_err());
+    let mut trailing = block_bytes(&old).unwrap();
+    trailing.push(0);
+    assert!(decode_pinned_local_body(Height(1), &old.header, &trailing).is_err());
+
+    let headers = canonical.chain.chain_headers();
+    canonical.chain.retain_recent_bodies(0, 0).unwrap();
+    assert!(canonical.chain.block(&Height(1)).is_none());
+    assert!(canonical.chain.block(&Height(2)).is_none());
+    assert_eq!(canonical.chain.chain_headers(), headers);
+    assert_eq!(canonical.chain.blocks().count(), 2); // Pinned genesis and tip.
+    assert_eq!(
+        canonical_block(&database, &canonical, Height(1)).unwrap(),
+        old
+    );
+    assert_eq!(
+        block_response(
+            &canonical,
+            &canonical_block(&database, &canonical, Height(1)).unwrap()
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        latest_blocks_response(&database, &canonical).unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    let checkpoints = build_header_state_checkpoints(&canonical).unwrap().0;
+    assert_eq!(
+        ledger_header_state_at_height(&canonical, &checkpoints, Height(1))
+            .unwrap()
+            .header,
+        old.header
+    );
+    assert_eq!(
+        ledger_header_locator(&canonical).unwrap().last().unwrap().0,
+        EXPECTED_GENESIS_HASH.0
+    );
+    assert_eq!(
+        expected_next_difficulty(&canonical.chain).unwrap(),
+        old.target_bits()
+    );
+    assert_eq!(
+        load_existing(&database).unwrap().state_root().unwrap(),
+        canonical.state_root().unwrap()
+    );
+    update_ledger_cache(&database, canonical).unwrap();
+
+    let mut alternative = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    let mut bodies = Vec::new();
+    for _ in 0..4 {
+        bodies.push(extend(
+            &mut alternative,
+            Address([0xd2; kernel::crypto::ADDRESS_SIZE]),
+            &mut memory,
+        ));
+    }
+    let (work, weight) = sequential_header_metrics(&alternative, Height(4));
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(0),
+        ancestor_hash: EXPECTED_GENESIS_HASH,
+        headers: bodies
+            .iter()
+            .map(|block| {
+                kernel::consensus::HeaderAtHeight::new(block.height(), block.header.clone())
+            })
+            .collect(),
+        peer_work: work,
+        peer_weight: weight,
+        preferred: true,
+    };
+    assert_eq!(apply_verified_branch(&database, sync, bodies).unwrap(), 4);
+    let replayed = load_existing(&database).unwrap();
+    assert_eq!(replayed.tip_hash(), alternative.tip_hash());
+    assert_eq!(
+        replayed.state_root().unwrap(),
+        alternative.state_root().unwrap()
+    );
+    assert_eq!(
+        crate::storage::CanonicalBodyReader::new(&database)
+            .unwrap()
+            .count(),
+        5
+    );
+    let pinned_tip = pinned_reader
+        .map(|bytes| decode_block(&bytes.unwrap()).unwrap())
+        .last()
+        .unwrap();
+    assert_eq!(Some(pinned_tip.hash().unwrap()), original_tip);
+}
+
+#[cfg(feature = "devnet")]
+#[test]
+fn scratch_recovery_replays_expired_journals_and_survives_restart() {
+    let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
+    let database = test_database("scratch-expired");
+    let miner = Address([0xd1; kernel::crypto::ADDRESS_SIZE]);
+    let mut memory = new_pow_memory();
+    let mut canonical = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+        let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
+        assert!(
+            crate::miner::mine_range(
+                &mut block,
+                crate::miner::MiningRange {
+                    start_nonce: 0,
+                    attempts: 1000,
+                },
+                memory
+            )
+            .unwrap()
+            .is_some()
+        );
+        apply_block(ledger, block.clone()).unwrap();
+        block
+    }
+    for _ in 0..3 {
+        extend(&mut canonical, miner, &mut memory);
+    }
+    persist_chain_and_pending(&database, &canonical, &[]).unwrap();
+    let pinned_reader = crate::storage::CanonicalBodyReader::new(&database).unwrap();
+    let original_tip = canonical.tip_hash();
+    canonical.discard_rollback_journals_before(Height(4));
+    let captured = Arc::new(canonical.clone());
+    update_ledger_cache(&database, canonical).unwrap();
+
+    let mut alternative = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    let mut bodies = Vec::new();
+    for _ in 0..4 {
+        bodies.push(extend(
+            &mut alternative,
+            Address([0xd2; kernel::crypto::ADDRESS_SIZE]),
+            &mut memory,
+        ));
+    }
+    let (work, weight) = sequential_header_metrics(&alternative, Height(4));
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(0),
+        ancestor_hash: EXPECTED_GENESIS_HASH,
+        headers: bodies
+            .iter()
+            .map(|block| {
+                kernel::consensus::HeaderAtHeight::new(block.height(), block.header.clone())
+            })
+            .collect(),
+        peer_work: work,
+        peer_weight: weight,
+        preferred: true,
+    };
+    let make_sync = || HeaderSyncResult {
+        ancestor_height: sync.ancestor_height,
+        ancestor_hash: sync.ancestor_hash,
+        headers: sync.headers.clone(),
+        peer_work: sync.peer_work,
+        peer_weight: sync.peer_weight,
+        preferred: true,
+    };
+    let mut forged = make_sync();
+    forged.peer_work = Work::MAX;
+    assert!(
+        super::recovery::recover_branch(
+            &database,
+            captured.clone(),
+            forged,
+            bodies.clone().into_iter().map(Ok)
+        )
+        .unwrap_err()
+        .contains("work does not match")
+    );
+    let before = crate::storage::read_blocks(&database).unwrap();
+    let mut failed = bodies.iter().cloned().map(Ok).collect::<Vec<_>>();
+    failed[2] = Err("simulated local download I/O failure".into());
+    assert!(
+        super::recovery::recover_branch(
+            &database,
+            captured.clone(),
+            make_sync(),
+            failed.into_iter()
+        )
+        .unwrap_err()
+        .contains("simulated local download")
+    );
+    assert_eq!(crate::storage::read_blocks(&database).unwrap(), before);
+    assert_eq!(
+        load_or_initialize(&database).unwrap().tip_hash(),
+        original_tip
+    );
+    assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
+    let mut bad = bodies.clone();
+    bad[1].body_mut().emission.as_mut().unwrap().to = Address::ZERO;
+    assert!(
+        super::recovery::recover_branch(
+            &database,
+            captured.clone(),
+            make_sync(),
+            bad.into_iter().map(Ok)
+        )
+        .is_err()
+    );
+    assert_eq!(crate::storage::read_blocks(&database).unwrap(), before);
+    assert_eq!(
+        load_or_initialize(&database).unwrap().tip_hash(),
+        original_tip
+    );
+    assert_eq!(
+        super::recovery::recover_branch(
+            &database,
+            captured.clone(),
+            make_sync(),
+            bodies.into_iter().map(Ok)
+        )
+        .unwrap(),
+        4
+    );
+    assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
+    let replayed = load_existing(&database).unwrap();
+    assert_eq!(replayed.tip_hash(), alternative.tip_hash());
+    assert_eq!(
+        replayed.state_root().unwrap(),
+        alternative.state_root().unwrap()
+    );
+    assert_eq!(
+        crate::storage::CanonicalBodyReader::new(&database)
+            .unwrap()
+            .count(),
+        5
+    );
+    let pinned_tip = pinned_reader
+        .map(|bytes| decode_block(&bytes.unwrap()).unwrap())
+        .last()
+        .unwrap();
+    assert_eq!(Some(pinned_tip.hash().unwrap()), original_tip);
+}
+
+#[cfg(feature = "devnet")]
+#[test]
+fn scratch_recovery_uses_ancestor_snapshot_rechecks_work_and_rejects_invalid_state() {
+    let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
+    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+        let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
+        crate::miner::mine_range(
+            &mut block,
+            crate::miner::MiningRange {
+                start_nonce: 0,
+                attempts: 1000,
+            },
+            memory,
+        )
+        .unwrap()
+        .unwrap();
+        apply_block(ledger, block.clone()).unwrap();
+        block
+    }
+    let database = test_database("scratch-snapshot-concurrent");
+    let mut memory = new_pow_memory();
+    let mut canonical = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    extend(&mut canonical, Address::ZERO, &mut memory);
+    let prefix = canonical.clone();
+    for _ in 0..2 {
+        extend(&mut canonical, Address::ZERO, &mut memory);
+    }
+    persist_chain_and_pending(&database, &canonical, &[]).unwrap();
+    crate::snapshot::write(&database, &prefix).unwrap();
+    // A newer snapshot must never be used to start recovery below its tip.
+    crate::snapshot::write(&database, &canonical).unwrap();
+    canonical.discard_rollback_journals_before(Height(4));
+    let captured = Arc::new(canonical.clone());
+    update_ledger_cache(&database, canonical.clone()).unwrap();
+    let mut alternative = prefix.clone();
+    let bodies = (0..4)
+        .map(|_| {
+            extend(
+                &mut alternative,
+                Address([0xe3; kernel::crypto::ADDRESS_SIZE]),
+                &mut memory,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (work, weight) = sequential_header_metrics(&alternative, Height(5));
+    let make_sync = |bodies: &[Block]| HeaderSyncResult {
+        ancestor_height: Height(1),
+        ancestor_hash: prefix.tip_hash().unwrap(),
+        headers: bodies
+            .iter()
+            .map(|block| {
+                kernel::consensus::HeaderAtHeight::new(block.height(), block.header.clone())
+            })
+            .collect(),
+        peer_work: work,
+        peer_weight: weight,
+        preferred: true,
+    };
+    // A structurally committed, mined header with a wrong execution root is invalid.
+    let mut invalid = bodies.clone();
+    invalid.last_mut().unwrap().header.state_root = prefix.state_root().unwrap();
+    crate::miner::mine_range(
+        invalid.last_mut().unwrap(),
+        crate::miner::MiningRange {
+            start_nonce: 0,
+            attempts: 1000,
+        },
+        &mut memory,
+    )
+    .unwrap()
+    .unwrap();
+    let original = crate::storage::read_blocks(&database).unwrap();
+    assert!(
+        super::recovery::recover_branch(
+            &database,
+            captured.clone(),
+            make_sync(&invalid),
+            invalid.clone().into_iter().map(Ok)
+        )
+        .unwrap_err()
+        .contains("invalid recovery candidate")
+    );
+    assert!(
+        super::recovery::recover_branch(
+            &database,
+            captured.clone(),
+            make_sync(&invalid),
+            invalid.clone().into_iter().map(Ok)
+        )
+        .unwrap_err()
+        .contains("already validated")
+    );
+    assert_eq!(crate::storage::read_blocks(&database).unwrap(), original);
+    // A concurrent canonical append happens while the recovery lock is held,
+    // proving that replay does not hold the state mutation lock.
+    let mut advanced = canonical;
+    let appended = extend(&mut advanced, Address::ZERO, &mut memory);
+    let mut moved = false;
+    let stream = bodies.iter().cloned().map(|block| {
+        if !moved {
+            let _mutation = state_mutation_lock().unwrap().lock().unwrap();
+            persist_block_and_pending(&database, &appended, &[]).unwrap();
+            update_ledger_cache(&database, advanced.clone()).unwrap();
+            moved = true;
+        }
+        Ok(block)
+    });
+    assert_eq!(
+        super::recovery::recover_branch(&database, captured.clone(), make_sync(&bodies), stream)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        load_or_initialize(&database).unwrap().tip_hash(),
+        alternative.tip_hash()
+    );
+    assert_eq!(
+        load_existing(&database).unwrap().tip_hash(),
+        alternative.tip_hash()
+    );
+    assert_eq!(
+        super::recovery::recover_branch(
+            &database,
+            Arc::new(advanced.clone()),
+            make_sync(&bodies),
+            bodies.clone().into_iter().map(Ok)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        load_existing(&database).unwrap().state_root().unwrap(),
+        alternative.state_root().unwrap()
+    );
+    assert_eq!(
+        crate::storage::canonical_index_tip(&database).unwrap(),
+        Some((5, alternative.tip_hash().unwrap().0))
+    );
+    assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
+}
+
+#[cfg(feature = "devnet")]
+#[test]
+fn production_pruning_bounds_journals_and_recovers_a_deeper_valid_fork() {
+    let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
+    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+        let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
+        crate::miner::mine_range(
+            &mut block,
+            crate::miner::MiningRange {
+                start_nonce: 0,
+                attempts: 1000,
+            },
+            memory,
+        )
+        .unwrap()
+        .unwrap();
+        apply_block(ledger, block.clone()).unwrap();
+        block
+    }
+    let database = test_database("production-pruning-deep-fork");
+    let mut memory = new_pow_memory();
+    let mut canonical = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    persist_chain_and_pending(&database, &canonical, &[]).unwrap();
+    let mut prefix = canonical.clone();
+    for height in 1..=260 {
+        let block = extend(&mut canonical, Address::ZERO, &mut memory);
+        persist_block_and_pending(&database, &block, &[]).unwrap();
+        let root = canonical.state_root().unwrap();
+        super::journal::prune_journals(&database, &mut canonical).unwrap();
+        trim_body_cache(&mut canonical).unwrap();
+        assert_eq!(canonical.state_root().unwrap(), root);
+        assert!(canonical.rollback_journal_heights().count() <= 256);
+        if height == 2 {
+            prefix = canonical.clone();
+        }
+    }
+    assert_eq!(canonical.rollback_journal_heights().next(), Some(Height(5)));
+    assert!(canonical.can_rollback_to(Height(4)));
+    assert!(!canonical.can_rollback_to(Height(3)));
+    let mut shallow = canonical.clone();
+    shallow.rollback_tip().unwrap();
+    assert_eq!(shallow.tip_height(), Some(Height(259)));
+    let old_tip = canonical.tip_hash();
+    crate::snapshot::write(&database, &canonical).unwrap();
+    let replayed = load_existing(&database).unwrap();
+    assert_eq!(replayed.tip_hash(), old_tip);
+    assert_eq!(replayed.rollback_journal_heights().count(), 256);
+    let historical = canonical_block(&database, &replayed, Height(1)).unwrap();
+    assert!(stored_block_response(&database, &replayed, &historical).is_ok());
+    update_ledger_cache(&database, canonical).unwrap();
+    let mut alternative = prefix;
+    let bodies = (3..=261)
+        .map(|_| {
+            extend(
+                &mut alternative,
+                Address([0xf4; kernel::crypto::ADDRESS_SIZE]),
+                &mut memory,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (work, weight) = build_header_state_checkpoints(&alternative)
+        .map(|(_, work, weight)| (work, weight))
+        .unwrap();
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(2),
+        ancestor_hash: alternative
+            .chain
+            .header(&Height(2))
+            .unwrap()
+            .hash()
+            .unwrap(),
+        headers: bodies
+            .iter()
+            .map(|block| {
+                kernel::consensus::HeaderAtHeight::new(block.height(), block.header.clone())
+            })
+            .collect(),
+        peer_work: work,
+        peer_weight: weight,
+        preferred: true,
+    };
+    assert_eq!(apply_verified_branch(&database, sync, bodies).unwrap(), 259);
+    let recovered = load_existing(&database).unwrap();
+    assert_eq!(recovered.tip_hash(), alternative.tip_hash());
+    assert_eq!(
+        recovered.state_root().unwrap(),
+        alternative.state_root().unwrap()
+    );
+    assert_eq!(recovered.rollback_journal_heights().count(), 256);
+    assert!(!recovered.can_rollback_to(Height(2)));
+    assert_eq!(
+        crate::storage::CanonicalBodyReader::new(&database)
+            .unwrap()
+            .count(),
+        262
+    );
+    assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
+}
+
+#[cfg(feature = "devnet")]
+#[test]
+fn scratch_recovery_defers_if_concurrent_reorg_changes_common_ancestor() {
+    let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
+    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+        let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
+        crate::miner::mine_range(
+            &mut block,
+            crate::miner::MiningRange {
+                start_nonce: 0,
+                attempts: 1000,
+            },
+            memory,
+        )
+        .unwrap()
+        .unwrap();
+        apply_block(ledger, block.clone()).unwrap();
+        block
+    }
+    let database = test_database("scratch-concurrent-ancestor-change");
+    let mut memory = new_pow_memory();
+    let mut canonical = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    extend(&mut canonical, Address::ZERO, &mut memory);
+    let prefix = canonical.clone();
+    for _ in 0..2 {
+        extend(&mut canonical, Address::ZERO, &mut memory);
+    }
+    persist_chain_and_pending(&database, &canonical, &[]).unwrap();
+    canonical.discard_rollback_journals_before(Height(4));
+    let captured = Arc::new(canonical.clone());
+    update_ledger_cache(&database, canonical).unwrap();
+    let mut alternative = prefix.clone();
+    let bodies = (0..3)
+        .map(|_| {
+            extend(
+                &mut alternative,
+                Address([0xf5; kernel::crypto::ADDRESS_SIZE]),
+                &mut memory,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (_, work, weight) = build_header_state_checkpoints(&alternative).unwrap();
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(1),
+        ancestor_hash: prefix.tip_hash().unwrap(),
+        headers: bodies
+            .iter()
+            .map(|block| {
+                kernel::consensus::HeaderAtHeight::new(block.height(), block.header.clone())
+            })
+            .collect(),
+        peer_work: work,
+        peer_weight: weight,
+        preferred: true,
+    };
+    let mut replacement = kernel::genesis::genesis_ledger()
+        .unwrap()
+        .with_applications(extension::SystemApplications);
+    for _ in 0..2 {
+        extend(
+            &mut replacement,
+            Address([0xf6; kernel::crypto::ADDRESS_SIZE]),
+            &mut memory,
+        );
+    }
+    let mut moved = false;
+    let stream = bodies.into_iter().map(|block| {
+        if !moved {
+            let _mutation = state_mutation_lock().unwrap().lock().unwrap();
+            persist_chain_and_pending(&database, &replacement, &[]).unwrap();
+            update_ledger_cache(&database, replacement.clone()).unwrap();
+            moved = true;
+        }
+        Ok(block)
+    });
+    assert!(
+        super::recovery::recover_branch(&database, captured, sync, stream)
+            .unwrap_err()
+            .contains("fork ancestor changed")
+    );
+    assert_eq!(
+        load_existing(&database).unwrap().tip_hash(),
+        replacement.tip_hash()
+    );
+    assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
 }

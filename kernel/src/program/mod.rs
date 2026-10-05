@@ -48,6 +48,27 @@ pub(crate) fn deserialize_bounded_vec<T: BorshDeserialize, R: Read>(
     Ok(items)
 }
 
+/// Decode code without allocating the claimed size before bytes arrive.
+pub(crate) fn deserialize_program_code<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+    let length = u32::deserialize_reader(reader)? as usize;
+    if length > MAX_PROGRAM_CODE_SIZE {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "program code exceeds limit",
+        ));
+    }
+    let mut code = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    while code.len() < length {
+        let count = (length - code.len()).min(chunk.len());
+        reader.read_exact(&mut chunk[..count])?;
+        code.try_reserve(count)
+            .map_err(|_| Error::new(ErrorKind::OutOfMemory, "program code allocation failed"))?;
+        code.extend_from_slice(&chunk[..count]);
+    }
+    Ok(code)
+}
+
 #[cfg(test)]
 mod phase3_bounds_tests {
     use super::*;

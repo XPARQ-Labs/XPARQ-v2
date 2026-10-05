@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Error, ErrorKind, Read};
+use std::sync::Arc;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
@@ -55,26 +57,69 @@ impl ProgramHash {
     }
 
     pub fn derive(code: &[u8]) -> Result<Self, RegistryError> {
-        let bytes = canonical_bytes(&(b"xparq:program-code:v1", code.to_vec()))
+        let bytes = canonical_bytes(&(b"xparq:program-code:v1", code))
             .map_err(|_| RegistryError::Encoding)?;
 
         Ok(Self(domain(HashDomain::XPARQArtifact, &bytes).into_bytes()))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct ProgramRecord {
     pub code_hash: ProgramHash,
-    pub code: Vec<u8>,
+    /// Shared code bytes; canonical encoding remains the historical Vec encoding.
+    pub code: Arc<Vec<u8>>,
     pub owner: Address,
     pub nonce: u64,
     pub deployed_at: Height,
     pub state_value: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+impl BorshDeserialize for ProgramRecord {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            code_hash: ProgramHash::deserialize_reader(reader)?,
+            code: super::deserialize_program_code(reader)?.into(),
+            owner: Address::deserialize_reader(reader)?,
+            nonce: u64::deserialize_reader(reader)?,
+            deployed_at: Height::deserialize_reader(reader)?,
+            state_value: i64::deserialize_reader(reader)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize)]
 pub struct ProgramRegistry {
     programs: BTreeMap<ProgramId, ProgramRecord>,
+    // Derived lookup data must never affect canonical state bytes.
+    #[borsh(skip)]
+    deployments: BTreeSet<(Address, u64)>,
+}
+
+impl BorshDeserialize for ProgramRegistry {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        let count = u32::deserialize_reader(reader)?;
+        let mut registry = Self::default();
+        let mut previous = None;
+        for _ in 0..count {
+            let id = ProgramId::deserialize_reader(reader)?;
+            if previous.is_some_and(|previous| previous >= id) {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "noncanonical program registry keys",
+                ));
+            }
+            previous = Some(id);
+            let record = ProgramRecord::deserialize_reader(reader)?;
+            registry.validate_record(id, &record).map_err(|_| {
+                Error::new(ErrorKind::InvalidData, "invalid program registry record")
+            })?;
+            registry
+                .insert(id, record)
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "duplicate program deployment"))?;
+        }
+        Ok(registry)
+    }
 }
 
 impl ProgramRegistry {
@@ -91,21 +136,58 @@ impl ProgramRegistry {
         id: ProgramId,
         record: ProgramRecord,
     ) -> Result<(), RegistryError> {
-        if self.programs.contains_key(&id)
-            || self
-                .programs
-                .values()
-                .any(|existing| existing.owner == record.owner && existing.nonce == record.nonce)
-        {
-            return Err(RegistryError::AlreadyExists);
-        }
-
+        self.check_available(id, record.owner, record.nonce)?;
+        self.deployments.insert((record.owner, record.nonce));
         self.programs.insert(id, record);
         Ok(())
     }
 
     pub(crate) fn remove(&mut self, id: &ProgramId) -> Option<ProgramRecord> {
-        self.programs.remove(id)
+        let record = self.programs.remove(id)?;
+        self.deployments.remove(&(record.owner, record.nonce));
+        Some(record)
+    }
+
+    pub(crate) fn check_available(
+        &self,
+        id: ProgramId,
+        owner: Address,
+        nonce: u64,
+    ) -> Result<(), RegistryError> {
+        if self.contains(&id) || self.deployments.contains(&(owner, nonce)) {
+            return Err(RegistryError::AlreadyExists);
+        }
+        Ok(())
+    }
+
+    fn validate_record(&self, id: ProgramId, record: &ProgramRecord) -> Result<(), RegistryError> {
+        super::deploy::DeployProgram {
+            owner: record.owner,
+            nonce: record.nonce,
+            code: record.code.clone(),
+        }
+        .validate_structure()
+        .map_err(|_| RegistryError::InvalidRecord)?;
+        let hash = ProgramHash::derive(&record.code)?;
+        if hash != record.code_hash || ProgramId::derive(record.owner, record.nonce, hash)? != id {
+            return Err(RegistryError::InvalidRecord);
+        }
+        Ok(())
+    }
+
+    /// Audit restored state, including the derived owner/nonce lookup.
+    pub fn validate(&self, tip: Height) -> Result<(), RegistryError> {
+        let mut deployments = BTreeSet::new();
+        for (&id, record) in &self.programs {
+            self.validate_record(id, record)?;
+            if record.deployed_at > tip || !deployments.insert((record.owner, record.nonce)) {
+                return Err(RegistryError::InvalidRecord);
+            }
+        }
+        if deployments != self.deployments {
+            return Err(RegistryError::InvalidRecord);
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -126,4 +208,95 @@ impl ProgramRegistry {
 pub enum RegistryError {
     AlreadyExists,
     Encoding,
+    InvalidRecord,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::{DeployProgram, deploy_program, rollback_program};
+
+    fn deployment(nonce: u64) -> DeployProgram {
+        let mut code = b"XPVM".to_vec();
+        code.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0, 0]);
+        code.push(1);
+        code.extend_from_slice(&nonce.to_le_bytes());
+        code.push(3);
+        DeployProgram {
+            owner: Address::ZERO,
+            nonce,
+            code: code.into(),
+        }
+    }
+
+    #[test]
+    fn record_growth_matches_legacy_serialization_and_index_survives_restore() {
+        let mut registry = ProgramRegistry::default();
+        for nonce in 0..128 {
+            let before = canonical_bytes(&registry).unwrap().len();
+            let (id, record) =
+                crate::program::prepare_deployment(deployment(nonce), Height(3)).unwrap();
+            let expected_growth = canonical_bytes(&(id, &record)).unwrap().len();
+            registry.insert(id, record).unwrap();
+            let encoded = canonical_bytes(&registry).unwrap();
+            assert_eq!(encoded.len() - before, expected_growth);
+            // The auxiliary index must not change any historical state bytes.
+            assert_eq!(encoded, canonical_bytes(&registry.programs).unwrap());
+            registry = ProgramRegistry::try_from_slice(&encoded).unwrap();
+            registry.validate(Height(3)).unwrap();
+            let mut different_code = deployment(nonce);
+            Arc::make_mut(&mut different_code.code)[14] ^= 1;
+            assert!(matches!(
+                deploy_program(&mut registry, different_code, Height(3)),
+                Err(crate::program::DeployError::Registry(
+                    RegistryError::AlreadyExists
+                ))
+            ));
+        }
+        let (id, journal) = deploy_program(&mut registry, deployment(128), Height(3)).unwrap();
+        rollback_program(&mut registry, journal).unwrap();
+        assert!(!registry.contains(&id));
+        assert!(deploy_program(&mut registry, deployment(128), Height(3)).is_ok());
+    }
+
+    #[test]
+    fn restored_registry_rejects_corrupted_records_and_duplicate_owner_nonce() {
+        let mut registry = ProgramRegistry::default();
+        let (id, _) = deploy_program(&mut registry, deployment(1), Height(3)).unwrap();
+        for case in 0..6 {
+            let mut records = registry.programs.clone();
+            let record = records.get_mut(&id).unwrap();
+            match case {
+                0 => record.code_hash = ProgramHash::from_bytes([0; HASH_SIZE]),
+                1 => record.owner = Address::from_bytes([1; crypto::ADDRESS_SIZE]),
+                2 => record.nonce += 1,
+                3 => Arc::make_mut(&mut record.code)[0] = 0,
+                4 => {
+                    let record = records.remove(&id).unwrap();
+                    records.insert(ProgramId::from_bytes([0; HASH_SIZE]), record);
+                }
+                _ => {
+                    let mut record = record.clone();
+                    Arc::make_mut(&mut record.code)[14] ^= 1;
+                    record.code_hash = ProgramHash::derive(&record.code).unwrap();
+                    let second =
+                        ProgramId::derive(record.owner, record.nonce, record.code_hash).unwrap();
+                    records.insert(second, record);
+                }
+            }
+            assert!(
+                ProgramRegistry::try_from_slice(&canonical_bytes(&records).unwrap()).is_err(),
+                "case {case}"
+            );
+        }
+        assert_eq!(
+            registry.validate(Height(2)),
+            Err(RegistryError::InvalidRecord)
+        );
+        registry.deployments.clear();
+        assert_eq!(
+            registry.validate(Height(3)),
+            Err(RegistryError::InvalidRecord)
+        );
+    }
 }

@@ -29,12 +29,35 @@ pub enum AccountSignatureScheme {
 }
 
 impl AccountSignatureScheme {
+    pub const ALL: [Self; 3] = [Self::MlDsa44, Self::MlDsa65, Self::MlDsa87];
+
+    /// Frozen protocol identifier. Never change or reuse an existing ID.
+    pub const fn id(self) -> u8 {
+        match self {
+            Self::MlDsa44 => 1,
+            Self::MlDsa65 => 2,
+            Self::MlDsa87 => 3,
+        }
+    }
+
     /// Canonical consensus-facing registry entry for this ML-DSA account scheme.
     pub const fn registry_scheme(self) -> SignatureScheme {
         match self {
             Self::MlDsa44 => SignatureScheme::MlDsa44,
             Self::MlDsa65 => SignatureScheme::MlDsa65,
             Self::MlDsa87 => SignatureScheme::MlDsa87,
+        }
+    }
+}
+
+impl TryFrom<u8> for AccountSignatureScheme {
+    type Error = crate::CryptoError;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::MlDsa44),
+            2 => Ok(Self::MlDsa65),
+            3 => Ok(Self::MlDsa87),
+            _ => Err(crate::CryptoError::InvalidAccountScheme),
         }
     }
 }
