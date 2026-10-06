@@ -189,18 +189,13 @@ struct HttpRequest {
 }
 
 mod chain_sync;
-mod recovery;
-mod journal;
 mod config;
 mod explorer;
 mod gossip;
 #[cfg(feature = "litep2p-devnet")]
 mod inbound_budget;
-#[cfg(feature = "litep2p-devnet")]
-mod request_queue;
-#[cfg(feature = "litep2p-devnet")]
-mod response_budget;
 mod index;
+mod journal;
 #[cfg(feature = "litep2p-devnet")]
 mod litep2p_devnet;
 #[cfg(feature = "litep2p-devnet")]
@@ -209,6 +204,11 @@ mod mempool;
 mod mining;
 mod p2p;
 mod protocol;
+mod recovery;
+#[cfg(feature = "litep2p-devnet")]
+mod request_queue;
+#[cfg(feature = "litep2p-devnet")]
+mod response_budget;
 mod rpc;
 mod state;
 #[cfg(feature = "litep2p-devnet")]
