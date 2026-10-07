@@ -6,7 +6,7 @@ pub struct TestApplications;
 /// The host must validate authorization and provide atomic commit/rollback.
 pub fn execute_transfer<H: CoinHost + ?Sized>(
     host: &mut H,
-    inputs: &[H::CoinId],
+    inputs: &[CoinShare],
     outputs: &[(crypto::Address, u64)],
     miner: crypto::Address,
     miner_fee: u64,
@@ -50,7 +50,7 @@ pub fn execute_transfer<H: CoinHost + ?Sized>(
 impl ApplicationExecutor for TestApplications {
     fn execute_coin(
         &self,
-        host: &mut dyn CoinHost<CoinId = CoinShare, Error = StateError>,
+        host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
         outputs: &[(Address, u64)],
         miner: Address,

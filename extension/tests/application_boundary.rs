@@ -115,7 +115,7 @@ enum BadApplication {
 impl ApplicationExecutor for BadApplication {
     fn execute_coin(
         &self,
-        host: &mut dyn CoinHost<CoinId = CoinShare, Error = StateError>,
+        host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
         outputs: &[(Address, u64)],
         miner: Address,

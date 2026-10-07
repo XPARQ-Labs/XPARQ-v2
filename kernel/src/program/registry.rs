@@ -4,12 +4,24 @@ use std::sync::Arc;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
+use serde::{Deserialize, Serialize};
 
 use crate::common::Height;
 
 /// Hash identifying deployed code in the registry, distinct from SystemProgramId routes.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Serialize,
+    Deserialize,
 )]
 pub struct ProgramId([u8; HASH_SIZE]);
 

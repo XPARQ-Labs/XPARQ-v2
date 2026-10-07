@@ -1,21 +1,16 @@
 //! Native XPQ transfer execution through a kernel-owned coin host.
-
+use crate::common::Owner;
 pub const TRANSFER: u8 = 1;
+use crate::monetary::coin::CoinShare;
 
 /// Restricted capability implemented by the kernel. The program never receives
 /// the ledger, coin types, or mutable access to monetary counters.
 pub trait CoinHost {
-    type CoinId: Copy;
     type Error;
 
-    fn input_amount(&self, id: &Self::CoinId) -> Result<u64, Self::Error>;
-    fn consume(&mut self, id: Self::CoinId) -> Result<(), Self::Error>;
-    fn create(
-        &mut self,
-        index: u32,
-        owner: crypto::Address,
-        amount: u64,
-    ) -> Result<(), Self::Error>;
+    fn input_amount(&self, id: &CoinShare) -> Result<u64, Self::Error>;
+    fn consume(&mut self, id: CoinShare) -> Result<(), Self::Error>;
+    fn create(&mut self, index: u32, owner: Owner, amount: u64) -> Result<(), Self::Error>;
     fn burn(&mut self, amount: u64) -> Result<(), Self::Error>;
 }
 

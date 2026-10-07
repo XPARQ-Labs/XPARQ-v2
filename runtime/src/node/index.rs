@@ -58,7 +58,12 @@ fn transaction_addresses(
     };
 
     let AuthorizedProgramEnvelope::Program(tx) = transaction;
-    addresses.extend(explorer::program_recipients(tx));
+    addresses.extend(explorer::program_recipients(tx).into_iter().filter_map(
+        |owner| match owner {
+            kernel::common::Owner::Address(address) => Some(address),
+            kernel::common::Owner::Program(_) => None,
+        },
+    ));
     addresses.insert(sender);
 
     for output in outputs {

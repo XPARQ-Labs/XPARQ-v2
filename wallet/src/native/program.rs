@@ -12,6 +12,8 @@ use extension::{
     script::call::{ProgramCall, SystemProgramId},
 };
 
+use kernel::common::Owner;
+
 fn amount(args: &[String], name: &str) -> Result<Unit, String> {
     parse_asset_display_amount(
         option(args, name).ok_or_else(|| format!("missing {name}"))?,
@@ -199,8 +201,13 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| e.to_string())?
                 .as_nanos() as u64;
-            let metadata = Metadata::new(name.clone(), max_supply, wallet.address(), authority)
-                .map_err(|e| e.to_string())?;
+            let metadata = Metadata::new(
+                name.clone(),
+                max_supply,
+                Owner::Address(wallet.address()),
+                Owner::Address(authority),
+            )
+            .map_err(|e| e.to_string())?;
             let id = AssetContract::derive(&metadata, nonce).map_err(|e| e.to_string())?;
             let call = encode(
                 AssetOpcode::Register,
@@ -208,7 +215,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                     name,
                     max_supply,
                     initial_mint,
-                    mint_authority: authority,
+                    mint_authority: Owner::Address(authority),
                     nonce,
                 },
             )?;
@@ -229,7 +236,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                 &Mint {
                     asset: id,
                     nonce,
-                    recipient: recipient(args)?,
+                    recipient: Owner::Address(recipient(args)?),
                     amount: amount(args, "--amount")?,
                 },
             )?
@@ -251,12 +258,12 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
             } else {
                 recipient(args)?
             };
-            let mut outputs = vec![AssetOutput::new(to, sent)];
+            let mut outputs = vec![AssetOutput::new(Owner::Address(to), sent)];
             let change = total
                 .checked_sub(sent)
                 .ok_or("insufficient program balance")?;
             if !change.is_zero() {
-                outputs.push(AssetOutput::new(wallet.address(), change));
+                outputs.push(AssetOutput::new(Owner::Address(wallet.address()), change));
             }
             encode(
                 AssetOpcode::Transfer,

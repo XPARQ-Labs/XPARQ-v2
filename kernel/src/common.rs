@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crypto::Address;
 
-use crate::monetary::coin::Zeno;
+use crate::{monetary::coin::Zeno, program::ProgramId};
 
 pub use crypto::ChainContext;
 
@@ -39,17 +39,38 @@ pub struct Height(pub u64);
 )]
 pub struct Nonce(pub u64);
 
+#[derive(
+    BorshSerialize,
+    BorshDeserialize,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+pub enum Owner {
+    Address(Address),
+    Program(ProgramId),
+}
+
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recipient {
     Address(Address),
+    Program(ProgramId),
     BlockMiner,
 }
 
 impl Recipient {
-    pub const fn resolve(self, block_miner: Address) -> Address {
+    pub const fn resolve(self, block_miner: Address) -> Owner {
         match self {
-            Self::Address(address) => address,
-            Self::BlockMiner => block_miner,
+            Self::Address(address) => Owner::Address(address),
+            Self::Program(program) => Owner::Program(program),
+            Self::BlockMiner => Owner::Address(block_miner),
         }
     }
 }

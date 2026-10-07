@@ -1,14 +1,13 @@
-use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::Address;
-
 use super::asset::{AssetContract, AssetOutput, Share, Unit};
+use crate::common::Owner;
+use borsh::{BorshDeserialize, BorshSerialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Register {
     pub name: String,
     pub max_supply: Unit,
     pub initial_mint: Unit,
-    pub mint_authority: Address,
+    pub mint_authority: Owner,
     pub nonce: u64,
 }
 
@@ -16,7 +15,7 @@ pub struct Register {
 pub struct Mint {
     pub asset: AssetContract,
     pub nonce: u64,
-    pub recipient: Address,
+    pub recipient: Owner,
     pub amount: Unit,
 }
 

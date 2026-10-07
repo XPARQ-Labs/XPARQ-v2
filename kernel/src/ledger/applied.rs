@@ -1,4 +1,5 @@
 use crate::{
+    common::Owner,
     ledger::{CoinRollbackJournal, CoinUtxo, LedgerState, StateError, StateRollbackJournal},
     monetary::coin::{CoinShare, Zeno},
     program::{AuthorizationCommitment, CoinTransition},
@@ -23,7 +24,7 @@ mod vm_state_call_tests {
     use super::*;
     use crate::program::system::script::call::{ProgramCall, SystemProgramId};
     use crate::{
-        common::{ChainContext, Height},
+        common::{ChainContext, Height, Owner},
         consensus::{ProtocolBurn, StateTransitionWeight},
         monetary::coin::CoinOutput,
         operation::BlockOperation,
@@ -195,7 +196,7 @@ impl LedgerState {
 
             let outputs: Vec<_> = outputs
                 .iter()
-                .map(|output| (output.output, output.amount.as_zeno()))
+                .map(|output| (Owner::Address(output.output), output.amount.as_zeno()))
                 .collect();
 
             let input_total = inputs.iter().try_fold(0u64, |total, id| {
@@ -277,7 +278,7 @@ impl LedgerState {
 
 struct KernelCoinHost<'a, F> {
     allowed_inputs: &'a std::collections::BTreeSet<CoinShare>,
-    outputs: &'a [(Address, u64)],
+    outputs: &'a [(Owner, u64)],
     miner: Address,
     miner_fee: u64,
     expected_burn: u64,
@@ -295,8 +296,6 @@ struct KernelCoinHost<'a, F> {
 impl<F: FnMut(TransitionPoint) -> Result<(), StateError>>
     crate::program::system::coin_program::CoinHost for KernelCoinHost<'_, F>
 {
-    type CoinId = CoinShare;
-
     type Error = StateError;
 
     fn input_amount(&self, id: &CoinShare) -> Result<u64, StateError> {
@@ -321,11 +320,11 @@ impl<F: FnMut(TransitionPoint) -> Result<(), StateError>>
         (self.checkpoint)(TransitionPoint::CoinInputConsumed)
     }
 
-    fn create(&mut self, index: u32, owner: Address, amount: u64) -> Result<(), StateError> {
+    fn create(&mut self, index: u32, owner: Owner, amount: u64) -> Result<(), StateError> {
         let expected = if let Some(output) = self.outputs.get(index as usize) {
             *output
         } else if index as usize == self.outputs.len() && self.miner_fee != 0 {
-            (self.miner, self.miner_fee)
+            (Owner::Address(self.miner), self.miner_fee)
         } else {
             return Err(StateError::InvalidTransition);
         };
@@ -648,6 +647,7 @@ impl LedgerState {
                         &call,
                         crate::program::system::asset_program::state::ExecutionContext {
                             signer: tx.signer,
+                            actor: Owner::Address(tx.signer),
 
                             commitment: crypto::domain(crypto::HashDomain::AssetIntent, &bytes)
                                 .into_bytes(),

@@ -1,6 +1,7 @@
 //! Protocol application set installed by the runtime.
 
 use kernel::{
+    common::Owner,
     crypto::Address,
     ledger::StateError,
     monetary::coin::CoinShare,
@@ -19,9 +20,9 @@ pub struct SystemApplications;
 impl ApplicationExecutor for SystemApplications {
     fn execute_coin(
         &self,
-        host: &mut dyn CoinHost<CoinId = CoinShare, Error = StateError>,
+        host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
-        outputs: &[(Address, u64)],
+        outputs: &[(Owner, u64)],
         miner: Address,
         miner_fee: u64,
     ) -> Result<(), TransferError<StateError>> {

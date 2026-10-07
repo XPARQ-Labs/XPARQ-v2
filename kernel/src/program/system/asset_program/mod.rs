@@ -147,7 +147,7 @@ mod tests {
         let mint = Mint {
             asset: asset::AssetContract::from_bytes([1; crypto::HASH_SIZE]),
             nonce: 7,
-            recipient: crypto::Address::from_bytes([2; crypto::ADDRESS_SIZE]),
+            recipient: Owner::Address(crypto::Address::from_bytes([2; crypto::ADDRESS_SIZE])),
             amount: asset::Unit::from_units(9),
         };
         let call = ProgramCall {

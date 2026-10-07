@@ -6,7 +6,7 @@ use crypto::{BlockHash, HashDomain, StateRoot, canonical_bytes, domain};
 
 use crate::{
     blockchain::{Block, Chain, ChainError},
-    common::Height,
+    common::{Height, Owner},
     consensus::{
         ApplyBlockState, CoinInputState, ConsensusError, DeployConsensusError, EmissionError,
         ProgramConsensusError, ProgramStateView, ValidatedBlock, validate_deploy,
@@ -325,7 +325,7 @@ impl Ledger {
                 CoinUtxo {
                     amount: emission.miner_emission(),
 
-                    owner: emission.recipient(),
+                    owner: Owner::Address(emission.recipient()),
                 },
             )?;
 

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::common::Owner;
 use crypto::Address;
 
 use super::system::{
@@ -27,9 +28,9 @@ pub trait AssetHost {
 pub trait ApplicationExecutor: Send + Sync {
     fn execute_coin(
         &self,
-        host: &mut dyn CoinHost<CoinId = CoinShare, Error = StateError>,
+        host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
-        outputs: &[(Address, u64)],
+        outputs: &[(Owner, u64)],
         miner: Address,
         miner_fee: u64,
     ) -> Result<(), TransferError<StateError>>;
@@ -62,9 +63,9 @@ pub struct NoApplications;
 impl ApplicationExecutor for NoApplications {
     fn execute_coin(
         &self,
-        _: &mut dyn CoinHost<CoinId = CoinShare, Error = StateError>,
+        _: &mut dyn CoinHost<Error = StateError>,
         _: &[CoinShare],
-        _: &[(Address, u64)],
+        _: &[(Owner, u64)],
         _: Address,
         _: u64,
     ) -> Result<(), TransferError<StateError>> {

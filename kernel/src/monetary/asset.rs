@@ -1,8 +1,10 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{
-    Address, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, canonical_bytes,
-    domain, domain16,
+    HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, canonical_bytes, domain,
+    domain16,
 };
+
+use crate::common::Owner;
 
 use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
 
@@ -99,16 +101,16 @@ pub struct Metadata {
     // Rename to Metadata
     pub name: String,
     pub max_supply: Unit,
-    pub creator: Address,
-    pub mint_authority: Address,
+    pub creator: Owner,
+    pub mint_authority: Owner,
 }
 
 impl Metadata {
     pub fn new(
         name: String,
         max_supply: Unit,
-        creator: Address,
-        mint_authority: Address,
+        creator: Owner,
+        mint_authority: Owner,
     ) -> Result<Self, AssetError> {
         let metadata = Self {
             name,
@@ -341,11 +343,11 @@ mod identifier_tests {
 pub struct AssetShare {
     pub asset: AssetContract,
     pub amount: Unit,
-    pub owner: Address,
+    pub owner: Owner,
 }
 
 impl AssetShare {
-    pub const fn new(asset: AssetContract, amount: Unit, owner: Address) -> Self {
+    pub const fn new(asset: AssetContract, amount: Unit, owner: Owner) -> Self {
         Self {
             asset,
             amount,
@@ -361,12 +363,12 @@ impl AssetShare {
 /// Program call output that creates a new native asset share.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AssetOutput {
-    pub recipient: Address,
+    pub recipient: Owner,
     pub amount: Unit,
 }
 
 impl AssetOutput {
-    pub const fn new(recipient: Address, amount: Unit) -> Self {
+    pub const fn new(recipient: Owner, amount: Unit) -> Self {
         Self { recipient, amount }
     }
 }

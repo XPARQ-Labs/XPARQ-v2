@@ -1,13 +1,12 @@
 //! XPQ application execution using the restricted kernel coin host.
-
 pub use kernel::program::system::coin_program::*;
-
+use kernel::{common::Owner, monetary::coin::CoinShare};
 /// Execute a validated transfer, including funding for other Program calls.
 /// The host must validate authorization and provide atomic commit/rollback.
 pub fn execute_transfer<H: CoinHost + ?Sized>(
     host: &mut H,
-    inputs: &[H::CoinId],
-    outputs: &[(kernel::crypto::Address, u64)],
+    inputs: &[CoinShare],
+    outputs: &[(Owner, u64)],
     miner: kernel::crypto::Address,
     miner_fee: u64,
 ) -> Result<(), TransferError<H::Error>> {
@@ -39,7 +38,7 @@ pub fn execute_transfer<H: CoinHost + ?Sized>(
     if miner_fee != 0 {
         host.create(
             u32::try_from(outputs.len()).map_err(|_| TransferError::OutputIndexOverflow)?,
-            miner,
+            Owner::Address(miner),
             miner_fee,
         )
         .map_err(TransferError::Host)?;

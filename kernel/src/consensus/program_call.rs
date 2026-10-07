@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, error::Error as StdError, fmt};
 
+use crate::common::Owner;
 use crypto::{Address, canonical_bytes};
 
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoinInputState {
     pub amount: Zeno,
-    pub owner: Address,
+    pub owner: Owner,
 }
 
 pub trait ProgramStateView {
@@ -151,7 +152,7 @@ pub(crate) fn validate_coin_inputs(
     for id in inputs {
         let input = state.coin(*id).ok_or(ProgramConsensusError::UtxoNotFound)?;
 
-        if input.owner != signer {
+        if input.owner != Owner::Address(signer) {
             return Err(ProgramConsensusError::RecipientMismatch);
         }
 

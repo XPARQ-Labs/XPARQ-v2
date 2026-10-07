@@ -1,14 +1,14 @@
 use std::{collections::BTreeMap, error::Error as StdError, fmt};
 
+use crate::common::Owner;
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::Address;
 
 use crate::monetary::coin::{CoinShare, Zeno};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinUtxo {
     pub amount: Zeno,
-    pub owner: Address,
+    pub owner: Owner,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]

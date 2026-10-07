@@ -1,7 +1,7 @@
 //! Program invocation preparation and read-only state growth quotes.
 
 use crate::{
-    common::ChainContext,
+    common::{ChainContext, Owner},
     program::system::{
         asset_program::state::ExecutionContext,
         script::{
@@ -64,6 +64,7 @@ pub fn program_created_state_weight_with_applications(
         &call,
         ExecutionContext {
             signer: transaction.signer,
+            actor: Owner::Address(transaction.signer),
             commitment: domain(HashDomain::AssetIntent, &commitment).into_bytes(),
         },
     )

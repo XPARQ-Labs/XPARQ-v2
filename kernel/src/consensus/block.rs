@@ -11,7 +11,7 @@ use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory};
 
 pub const GENESIS_TARGET_BITS: u32 = crate::blockchain::GENESIS_TARGET_BITS;
 
-pub const TARGET_BITS_START: u32 = 0x207f_ffff;
+pub const TARGET_BITS_START: u32 = 0x201fffff;
 
 pub trait ApplyBlockState {
     type Error: From<ConsensusError>;
