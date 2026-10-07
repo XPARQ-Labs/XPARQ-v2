@@ -272,14 +272,17 @@ fn different_output_indexes_create_different_shares() {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CoinOutput {
-    pub output: Address,
+    pub output: crate::common::Owner,
     pub amount: Zeno,
 }
 
 impl CoinOutput {
+    pub const fn to_owner(recipient: crate::common::Owner, amount: Zeno) -> Self {
+        Self { output: recipient, amount }
+    }
     pub const fn new(recipient: Address, amount: Zeno) -> Self {
         Self {
-            output: recipient,
+            output: crate::common::Owner::Address(recipient),
             amount,
         }
     }

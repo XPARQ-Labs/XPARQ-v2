@@ -11,7 +11,7 @@ use crate::{
 
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
 
-pub const WBDA_WINDOW: usize = 10_000;
+pub const WBDA_WINDOW: usize = 2_500;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 800_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 1_200_000;
@@ -300,7 +300,7 @@ pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
 
 /// Canonical coin UTXO: XPQ key + amount + owner.
 pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (crate::monetary::coin::CoinShare::SIZE + core::mem::size_of::<u64>() + ADDRESS_SIZE) as u64;
+    (crate::monetary::coin::CoinShare::SIZE + core::mem::size_of::<u64>() + 1 + ADDRESS_SIZE) as u64;
 
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
     Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_BYTE);

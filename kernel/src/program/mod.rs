@@ -8,6 +8,7 @@ pub mod preparation;
 pub mod registry;
 pub mod system;
 pub mod vm;
+pub mod vm_transfer;
 
 pub use crate::error::{IntentError, ProgramEncodingError};
 pub use authorization::{

@@ -24,7 +24,7 @@ mod vm_state_call_tests {
     use super::*;
     use crate::program::system::script::call::{ProgramCall, SystemProgramId};
     use crate::{
-        common::{ChainContext, Height, Owner},
+        common::{ChainContext, Height},
         consensus::{ProtocolBurn, StateTransitionWeight},
         monetary::coin::CoinOutput,
         operation::BlockOperation,
@@ -45,7 +45,7 @@ mod vm_state_call_tests {
         let amount = Zeno::from_zeno(1_000_000);
         state
             .utxos
-            .insert_coin(input, CoinUtxo { amount, owner })
+            .insert_coin(input, CoinUtxo { amount, owner: crate::common::Owner::Address(owner) })
             .unwrap();
         state.coin.total_mined = amount;
         let mut code = b"XPVM".to_vec();
@@ -196,7 +196,7 @@ impl LedgerState {
 
             let outputs: Vec<_> = outputs
                 .iter()
-                .map(|output| (Owner::Address(output.output), output.amount.as_zeno()))
+                .map(|output| (output.output, output.amount.as_zeno()))
                 .collect();
 
             let input_total = inputs.iter().try_fold(0u64, |total, id| {
@@ -594,13 +594,7 @@ impl LedgerState {
             crate::program::program_invocation_commitment(tx.signer, &tx.call, &tx.payment, chain)
                 .map_err(crate::consensus::ProgramConsensusError::Intent)?;
 
-        let coin = staged.execute_coin_program_with_applications(
-            &tx.payment,
-            commitment,
-            miner,
-            applications,
-        )?;
-
+        let mut vm_coin = CoinRollbackJournal::default();
         let (journal, program_journal) =
             match crate::program::system::script::execute::decode_program(&tx.call)
                 .map_err(|_| StateError::InvalidTransition)?
@@ -617,6 +611,9 @@ impl LedgerState {
                         crate::program::vm::MAX_CALL_FUEL,
                     )
                     .map_err(|_| StateError::InvalidTransition)?;
+                    let (transfer_coin, transfer_asset) = crate::program::vm_transfer::settle(
+                        &mut staged, id, &result, commitment, applications)?;
+                    vm_coin = transfer_coin;
                     let journal = match result.proposed_effect {
                         Some(crate::program::vm::VmEffect::ProgramState(value)) => {
                             let previous = staged
@@ -630,7 +627,7 @@ impl LedgerState {
                         }
                         None => None,
                     };
-                    (None, journal)
+                    (transfer_asset, journal)
                 }
 
                 crate::program::system::script::execute::DecodedProgramCall::Asset(call) => {
@@ -646,7 +643,6 @@ impl LedgerState {
                         &mut staged.extensions.assets,
                         &call,
                         crate::program::system::asset_program::state::ExecutionContext {
-                            signer: tx.signer,
                             actor: Owner::Address(tx.signer),
 
                             commitment: crypto::domain(crypto::HashDomain::AssetIntent, &bytes)
@@ -658,6 +654,16 @@ impl LedgerState {
                     (Some(journal), None)
                 }
             };
+
+        let mut coin = staged.execute_coin_program_with_applications(
+            &tx.payment,
+            commitment,
+            miner,
+            applications,
+        )?;
+
+        coin.consumed_coins.append(&mut vm_coin.consumed_coins);
+        coin.created_coin_ids.append(&mut vm_coin.created_coin_ids);
 
         staged.validate_supply_invariants()?;
 
@@ -705,7 +711,7 @@ mod coin_atomicity_tests {
                 CoinUtxo {
                     amount: Zeno::from_zeno(100),
 
-                    owner,
+                    owner: crate::common::Owner::Address(owner),
                 },
             )
             .unwrap();

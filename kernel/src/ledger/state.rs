@@ -77,7 +77,7 @@ mod extension_commitment_tests {
             name: "ROOT".into(),
             max_supply: Unit::from_units(100),
             initial_mint: Unit::from_units(10),
-            mint_authority: Address::ZERO,
+            mint_authority: crate::common::Owner::Address(Address::ZERO),
             nonce: 1,
         });
         let journal = state
@@ -86,7 +86,7 @@ mod extension_commitment_tests {
             .apply(
                 &call,
                 ExecutionContext {
-                    signer: Address::ZERO,
+ actor: crate::common::Owner::Address(Address::ZERO),
                     commitment: [3; 32],
                 },
             )

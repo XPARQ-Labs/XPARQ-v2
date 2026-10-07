@@ -464,7 +464,7 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
         name: "LIVEPROGRAM".into(),
         max_supply: Unit::from_units(100),
         initial_mint: Unit::from_units(10),
-        mint_authority: signer,
+        mint_authority: kernel::common::Owner::Address(signer),
         nonce: 1,
     };
     let call = ProgramCall {

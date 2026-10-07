@@ -152,7 +152,7 @@
     },
     "/program/quote": {
       "post": {
-        "summary": "Quote canonical extension state growth for a signed Program transaction without submitting it",
+        "summary": "Quote state growth and VM transfer settlement for a signed Program transaction without submitting it",
         "requestBody": {
           "required": true,
           "content": {
@@ -166,13 +166,13 @@
         },
         "responses": {
           "200": {
-            "description": "created_state_weight in bytes, vm_fuel (one zeno burn per unit; zero for non-VM calls), and canonical tip_hash; payment burn is not checked during quote"
+            "description": "created_state_weight in bytes, vm_fuel, vm_created_coin_utxos, vm_consumed_coin_utxos, and canonical tip_hash; exact payment burn is not checked during quote"
           },
           "400": {
             "description": "Invalid Program quote request"
           }
         },
-        "description": "Verifies signed envelope authorization and previews asset state growth. Does not check exact payment burn or funding availability; this is not a VM fuel quote."
+        "description": "Verifies envelope authorization and previews asset state growth, VM fuel, and contract-owned transfers. Contract balance is checked; exact wallet payment burn is not checked."
       }
     },
     "/program/asset/{asset}": {
@@ -271,6 +271,30 @@
         "responses": {
           "200": {
             "description": "Transaction"
+          }
+        }
+      }
+    },
+    "/program/account/{program}": {
+      "get": {
+        "summary": "Get a deployed contract coin balance, live coin and asset shares, and scalar state",
+        "parameters": [
+          {
+            "name": "program",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "program_id, state_value, coin_balance in zeno, coins, and asset_shares in base units"
+          },
+          "400": {
+            "description": "Invalid or unknown deployed program"
           }
         }
       }

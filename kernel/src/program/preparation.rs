@@ -63,7 +63,6 @@ pub fn program_created_state_weight_with_applications(
         &mut preview.assets,
         &call,
         ExecutionContext {
-            signer: transaction.signer,
             actor: Owner::Address(transaction.signer),
             commitment: domain(HashDomain::AssetIntent, &commitment).into_bytes(),
         },

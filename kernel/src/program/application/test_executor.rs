@@ -7,7 +7,7 @@ pub struct TestApplications;
 pub fn execute_transfer<H: CoinHost + ?Sized>(
     host: &mut H,
     inputs: &[CoinShare],
-    outputs: &[(crypto::Address, u64)],
+    outputs: &[(Owner, u64)],
     miner: crypto::Address,
     miner_fee: u64,
 ) -> Result<(), TransferError<H::Error>> {
@@ -39,7 +39,7 @@ pub fn execute_transfer<H: CoinHost + ?Sized>(
     if miner_fee != 0 {
         host.create(
             u32::try_from(outputs.len()).map_err(|_| TransferError::OutputIndexOverflow)?,
-            miner,
+            crate::common::Owner::Address(miner),
             miner_fee,
         )
         .map_err(TransferError::Host)?;
@@ -52,7 +52,7 @@ impl ApplicationExecutor for TestApplications {
         &self,
         host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
-        outputs: &[(Address, u64)],
+        outputs: &[(crate::common::Owner, u64)],
         miner: Address,
         fee: u64,
     ) -> Result<(), TransferError<StateError>> {

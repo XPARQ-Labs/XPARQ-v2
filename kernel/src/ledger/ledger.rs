@@ -620,6 +620,7 @@ impl ApplyBlockState for Ledger {
 //
 
 impl ProgramStateView for LedgerState {
+    fn ledger_state(&self) -> Option<&LedgerState> { Some(self) }
     fn registry(&self) -> Option<&crate::program::ProgramRegistry> {
         Some(&self.programs)
     }
@@ -1043,7 +1044,7 @@ mod p3e_block_atomicity_tests {
                 CoinUtxo {
                     amount: Zeno::from_zeno(109),
 
-                    owner: crypto::Address([0x55; crypto::ADDRESS_SIZE]),
+                    owner: crate::common::Owner::Address(crypto::Address([0x55; crypto::ADDRESS_SIZE])),
                 },
             )
             .unwrap();
@@ -1280,7 +1281,7 @@ mod p3e_block_atomicity_tests {
 
         let mut altered = *coin;
 
-        altered.owner = crypto::Address([0x82; crypto::ADDRESS_SIZE]);
+        altered.owner = crate::common::Owner::Address(crypto::Address([0x82; crypto::ADDRESS_SIZE]));
 
         ledger.state.utxos.consume_coin(&coin_id).unwrap();
 
@@ -1675,7 +1676,7 @@ mod p3e_block_atomicity_tests {
 
             initial_mint: ExtUnit::from_units(10),
 
-            mint_authority: signer,
+            mint_authority: crate::common::Owner::Address(signer),
 
             nonce: 1,
         };
@@ -1719,7 +1720,7 @@ mod p3e_block_atomicity_tests {
             .apply(
                 &AssetCall::Register(register),
                 ExecutionContext {
-                    signer,
+ actor: crate::common::Owner::Address(signer),
 
                     commitment: [9; 32],
                 },
@@ -1912,7 +1913,7 @@ mod p3e_block_atomicity_tests {
                 .apply(
                     &call,
                     ExecutionContext {
-                        signer,
+ actor: crate::common::Owner::Address(signer),
 
                         commitment: [11; 32],
                     },
@@ -1937,7 +1938,7 @@ mod p3e_block_atomicity_tests {
                 .state
                 .utxos
                 .coins()
-                .filter(|(_, v)| v.owner == signer)
+                .filter(|(_, v)| v.owner == crate::common::Owner::Address(signer))
                 .max_by_key(|(_, v)| v.amount)
                 .unwrap();
 
@@ -2045,7 +2046,7 @@ mod p3e_block_atomicity_tests {
 
                 initial_mint: ExtUnit::from_units(40),
 
-                mint_authority: signer,
+                mint_authority: crate::common::Owner::Address(signer),
 
                 nonce: 1,
             }),
@@ -2070,7 +2071,7 @@ mod p3e_block_atomicity_tests {
 
                 nonce: 1,
 
-                recipient: signer,
+                recipient: crate::common::Owner::Address(signer),
 
                 amount: ExtUnit::from_units(20),
             }),
@@ -2095,7 +2096,7 @@ mod p3e_block_atomicity_tests {
 
                 inputs,
 
-                outputs: vec![AssetOutput::new(signer, ExtUnit::from_units(60))],
+                outputs: vec![AssetOutput::new(crate::common::Owner::Address(signer), ExtUnit::from_units(60))],
             }),
         );
 

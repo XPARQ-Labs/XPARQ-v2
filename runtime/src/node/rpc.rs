@@ -156,17 +156,33 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         {
             return Err("invalid quote authorization".into());
         }
+        let mut vm_quote = kernel::program::vm_transfer::TransferQuote::default();
         let vm_fuel = match kernel::program::system::script::execute::decode_program(&tx.call)
             .map_err(|e| format!("invalid program call: {e:?}"))?
         {
             kernel::program::system::script::execute::DecodedProgramCall::Vm(id) => {
-                kernel::program::vm::execute_registered(
+                let result = kernel::program::vm::execute_registered(
                     &ledger.state().programs,
                     kernel::program::ProgramId::from_bytes(id),
                     kernel::program::vm::MAX_CALL_FUEL,
                 )
-                .map_err(|e| format!("VM quote failed: {e:?}"))?
-                .fuel_used
+                .map_err(|e| format!("VM quote failed: {e:?}"))?;
+                let commitment = kernel::program::program_invocation_commitment(
+                    tx.signer,
+                    &tx.call,
+                    &tx.payment,
+                    chain,
+                )
+                .map_err(|e| e.to_string())?;
+                vm_quote = kernel::program::vm_transfer::quote(
+                    ledger.state(),
+                    kernel::program::ProgramId::from_bytes(id),
+                    &result,
+                    commitment,
+                    &extension::SystemApplications,
+                )
+                .map_err(|e| e.to_string())?;
+                result.fuel_used
             }
             _ => 0,
         };
@@ -181,7 +197,8 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             stream,
             200,
             &serde_json::json!({
-                "created_state_weight":weight, "vm_fuel":vm_fuel, "tip_hash": ledger.tip_hash().map(|h|hex::encode(h.0)),
+                "created_state_weight":weight + vm_quote.created_state_weight, "vm_fuel":vm_fuel,
+                "vm_created_coin_utxos":vm_quote.created_coin_utxos, "vm_consumed_coin_utxos":vm_quote.consumed_coin_utxos, "tip_hash": ledger.tip_hash().map(|h|hex::encode(h.0)),
             }),
         );
     }
@@ -238,6 +255,9 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     "created_in": origin.created_in.0,
                 })),
             })
+        }
+        route if route.starts_with("/program/account/") => {
+            program_account_response(&ledger, route)?
         }
         route if route.starts_with("/program/asset/") => program_asset_response(&ledger, route)?,
 

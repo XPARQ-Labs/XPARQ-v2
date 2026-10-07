@@ -67,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 3;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -127,6 +127,10 @@ struct ChainSpecIdentity<'a> {
     vm_memory_page_cost: u64,
     vm_state_read_cost: u64,
     vm_state_write_cost: u64,
+    vm_transfer_cost: u64,
+    vm_asset_register_cost: u64,
+    vm_asset_mint_cost: u64,
+    max_vm_transfer_inputs: u64,
     max_vm_call_fuel: u64,
     deploy_authorization: &'a str,
     deploy_burn_rule: &'a str,
@@ -181,9 +185,9 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         // Native protocol identity
         native_coin_contract: CoinContract::derive().into_bytes(),
         extension_asset_program: "xparq-native-xpq-and-asset-program-v2",
-        transaction_format: "coin-spend-and-xpq-asset-program-v2",
+        transaction_format: "owner-tagged-coin-spend-and-asset-program-v3",
         application_state_format: "coin-utxo-extension-and-program-state-v2",
-        vm_bytecode_format: "xpvm-state-slot-v2",
+        vm_bytecode_format: "xpvm-v1-v2-v3-program-asset-register-mint",
         max_vm_code_size: crate::program::MAX_PROGRAM_CODE_SIZE as u64,
         max_vm_stack_items: crate::program::vm::MAX_STACK_ITEMS,
         max_vm_memory_pages: crate::program::vm::MAX_MEMORY_PAGES,
@@ -192,6 +196,10 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         vm_memory_page_cost: crate::program::vm::MEMORY_PAGE_COST,
         vm_state_read_cost: crate::program::vm::STATE_READ_COST,
         vm_state_write_cost: crate::program::vm::STATE_WRITE_COST,
+        vm_transfer_cost: crate::program::vm::TRANSFER_COST,
+        vm_asset_register_cost: crate::program::vm::ASSET_REGISTER_COST,
+        vm_asset_mint_cost: crate::program::vm::ASSET_MINT_COST,
+        max_vm_transfer_inputs: crate::program::vm_transfer::MAX_TRANSFER_INPUTS as u64,
         max_vm_call_fuel: crate::program::vm::MAX_CALL_FUEL,
         deploy_authorization: "xparq:deploy-program:v1",
         deploy_burn_rule: "operation-bytes-plus-registry-growth-v1",
@@ -206,12 +214,11 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 1);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 3);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                208, 154, 51, 133, 136, 234, 88, 28, 202, 237, 30, 228, 189, 121, 140, 37, 142,
-                162, 169, 212, 136, 3, 54, 33, 162, 170, 90, 248, 60, 172, 107, 140
+                79, 165, 224, 18, 171, 213, 168, 54, 153, 255, 224, 192, 8, 227, 194, 122, 254, 205, 107, 90, 232, 190, 179, 111, 147, 60, 108, 166, 46, 221, 30, 174
             ]
         );
     }

@@ -95,7 +95,7 @@ bytecode. Choose an unused nonce for the deploying owner.
 
 The wallet obtains a deploy quote, selects XPQ funding, signs and submits to
 `/program/deploy`. `--offline` prints signed bytes instead of submitting; RPC is
-still required for funding and the quote. See [XPVM v1](../docs/XPVM.md) for the
+still required for funding and the quote. See [XPVM](../docs/XPVM.md) for the
 bytecode format. To execute a deployed program after deployment is confirmed:
 
 ```sh
@@ -119,3 +119,17 @@ cargo test -p wallet --test program_e2e -- --ignored --test-threads=1
 These ignored tests require an explicit run. Both passed on 3 October 2026:
 XPQ spend/consolidation and the asset lifecycle. They use real wallet/node binaries and temporary redb storage for register,
 mint, transfer, burn, consolidation, balances, recipient history and restart.
+
+## Contract balances and funding
+
+`sign-spend`, `program-transfer`, and `program-mint` accept a deployed contract
+recipient as `--to program:PROGRAM_ID`. Addresses retain their usual syntax.
+`program-account --program-id PROGRAM_ID` displays the contract's coin balance
+and live coin/asset shares. `program-call` executes its code and pays costs from
+the calling wallet. See [the fixed payout contract](../examples/vault/README.md)
+for an example that receives and sends both values.
+
+
+XPVM v3 programs can also register and mint native assets with the deployed program
+as mint authority. `program-call` quotes and pays the resulting state growth and
+fuel from the caller's wallet. See the [asset issuer example](../examples/asset_issuer/README.md).

@@ -134,7 +134,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                 name: "GOSSIPPROGRAM".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(40),
-                mint_authority: owner.address,
+                mint_authority: kernel::common::Owner::Address(owner.address),
                 nonce: 17,
             })
         } else {
@@ -153,16 +153,16 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                 1 => AssetCall::Mint(Mint {
                     asset,
                     nonce: 1,
-                    recipient: owner.address,
+                    recipient: kernel::common::Owner::Address(owner.address),
                     amount: Unit::from_units(20),
                 }),
                 2 => AssetCall::Transfer(Transfer {
                     asset,
                     inputs,
                     outputs: vec![
-                        AssetOutput::new(owner.address, Unit::from_units(20)),
-                        AssetOutput::new(owner.address, Unit::from_units(25)),
-                        AssetOutput::new(recipient, Unit::from_units(15)),
+                        AssetOutput::new(kernel::common::Owner::Address(owner.address), Unit::from_units(20)),
+                        AssetOutput::new(kernel::common::Owner::Address(owner.address), Unit::from_units(25)),
+                        AssetOutput::new(kernel::common::Owner::Address(recipient), Unit::from_units(15)),
                     ],
                 }),
                 3 => AssetCall::Burn(Burn {
@@ -183,7 +183,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                     AssetCall::Transfer(Transfer {
                         asset,
                         inputs,
-                        outputs: vec![AssetOutput::new(owner.address, Unit::from_units(40))],
+                        outputs: vec![AssetOutput::new(kernel::common::Owner::Address(owner.address), Unit::from_units(40))],
                     })
                 }
                 _ => unreachable!(),

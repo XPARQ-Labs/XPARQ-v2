@@ -101,7 +101,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
         .apply(
             &call,
             ExecutionContext {
-                signer,
+ actor: crate::common::Owner::Address(signer),
                 commitment: [11; 32],
             },
         )
@@ -120,7 +120,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
         .state
         .utxos
         .coins()
-        .filter(|(_, v)| v.owner == signer)
+        .filter(|(_, v)| v.owner == crate::common::Owner::Address(signer))
         .max_by_key(|(_, v)| v.amount)
         .unwrap();
     let amount = coin.amount;
@@ -298,7 +298,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
             name: "Phase4 Vector".into(),
             max_supply: Unit::from_units(100),
             initial_mint: Unit::from_units(10),
-            mint_authority: owner,
+            mint_authority: crate::common::Owner::Address(owner),
             nonce: 7,
         }),
     );
@@ -323,7 +323,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         AssetCall::Mint(Mint {
             asset,
             nonce: 1,
-            recipient: owner,
+            recipient: crate::common::Owner::Address(owner),
             amount: Unit::from_units(4),
         }),
     );
@@ -344,7 +344,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         AssetCall::Transfer(Transfer {
             asset,
             inputs,
-            outputs: vec![AssetOutput::new(owner, Unit::from_units(14))],
+            outputs: vec![AssetOutput::new(crate::common::Owner::Address(owner), Unit::from_units(14))],
         }),
     );
     record(&mut vectors, "program_transfer_block", &transfer);

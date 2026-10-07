@@ -49,12 +49,28 @@ pub(super) fn format_amount(units: u64) -> String {
 
 pub(super) fn print_help() {
     println!(
-        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS] [--limit 1..=250] [--before CURSOR]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS --amount CoinShare [--change CoinShare --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically calculates the miner fee from canonical transaction bytes; manual --miner fee input is not supported. Consolidation merges selected CoinShare UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active CoinShare inputs and calculates change through node RPC."
+        "wallet [menu]\nwallet new [--wallet PATH] [--words 12|24] [--account account]\nwallet restore --mnemonic PHRASE [--wallet PATH] [--account ACCOUNT]\nwallet address [--wallet PATH]\nwallet balance [--wallet PATH] [--rpc ADDRESS]\nwallet history [--wallet PATH] [--rpc ADDRESS] [--limit 1..=250] [--before CURSOR]\nwallet utxos [--wallet PATH] [--rpc ADDRESS]\nwallet sign-spend [--input COIN_ID...] --to ADDRESS_OR_program:ID --amount CoinShare [--change CoinShare --change-to ADDRESS] [--rpc ADDRESS] [--wallet PATH] [--offline]\nwallet consolidate [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet version\n\nAll signature accounts are active from genesis. Signed transactions are submitted to node RPC automatically. Use --offline to print canonical transaction hex instead. The wallet automatically calculates the miner fee from canonical transaction bytes; manual --miner fee input is not supported. Consolidation merges selected CoinShare UTXOs into one self-owned output and remains subject to archival burn and miner fee. History reports canonical address activity; UTXO tracker reads the wallet account endpoint and follows paginated UTXOs.\nRunning without a command opens the interactive menu.\nWithout --input, spend selects active CoinShare inputs and calculates change through node RPC."
     );
     println!(
-        "\nProgram asset commands:\nwallet program-register --name NAME --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-mint --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-transfer --asset CONTRACT --to ADDRESS --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-burn --asset CONTRACT --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-consolidate --asset CONTRACT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-info --asset CONTRACT [--rpc ADDRESS]\nwallet program-balance --asset CONTRACT [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts have 8 decimals. XPQ inputs, change, miner fee and protocol burn are calculated automatically. --offline prints a signed transaction but still needs RPC for inputs and fee quote. Wait for confirmation before dependent operations."
+        "\nProgram asset commands:\nwallet program-register --name NAME --max-supply AMOUNT --initial-mint AMOUNT [--fixed-supply] [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-mint --asset CONTRACT --to ADDRESS_OR_program:ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-transfer --asset CONTRACT --to ADDRESS_OR_program:ID --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-burn --asset CONTRACT --amount AMOUNT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-consolidate --asset CONTRACT [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-info --asset CONTRACT [--rpc ADDRESS]\nwallet program-balance --asset CONTRACT [--address ADDRESS | --wallet PATH] [--rpc ADDRESS]\n\nAsset amounts have 8 decimals. XPQ inputs, change, miner fee and protocol burn are calculated automatically. --offline prints a signed transaction but still needs RPC for inputs and fee quote. Wait for confirmation before dependent operations."
     );
     println!(
-        "\nBytecode deployment and execution:\nwallet program-deploy --code PROGRAM.xpvm --nonce NONCE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-call --program-id HEX_ID [--wallet PATH] [--rpc ADDRESS] [--offline]"
+        "\nBytecode deployment and execution:\nwallet program-deploy --code PROGRAM.xpvm --nonce NONCE [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-call --program-id HEX_ID [--wallet PATH] [--rpc ADDRESS] [--offline]\nwallet program-account --program-id HEX_ID [--rpc ADDRESS]"
     );
+}
+
+pub(super) fn parse_owner(value: &str) -> Result<kernel::common::Owner, String> {
+    if let Some(id) = value.strip_prefix("program:") {
+        let bytes: [u8; 32] = hex::decode(id)
+            .map_err(|_| "invalid program recipient")?
+            .try_into()
+            .map_err(|_| "program recipient must contain 32 bytes")?;
+        Ok(kernel::common::Owner::Program(
+            kernel::program::ProgramId::from_bytes(bytes),
+        ))
+    } else {
+        address_from_string(value)
+            .map(kernel::common::Owner::Address)
+            .map_err(|e| e.to_string())
+    }
 }

@@ -34,8 +34,8 @@ fn encode<T: borsh::BorshSerialize>(opcode: AssetOpcode, value: &T) -> Result<Pr
         payload: borsh::to_vec(value).map_err(|e| e.to_string())?,
     })
 }
-fn recipient(args: &[String]) -> Result<Address, String> {
-    address_from_string(option(args, "--to").ok_or("missing --to")?).map_err(|e| e.to_string())
+fn recipient(args: &[String]) -> Result<Owner, String> {
+    super::util::parse_owner(option(args, "--to").ok_or("missing --to")?)
 }
 fn shares(
     rpc: &str,
@@ -118,15 +118,20 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
     } else {
         0
     };
+    let vm_created = quote["vm_created_coin_utxos"].as_u64().unwrap_or(0);
+    let vm_consumed = quote["vm_consumed_coin_utxos"].as_u64().unwrap_or(0);
     let transaction = automatic_fee_transaction(|fee, archival| {
-        let (inputs, _, _, change) = select_account_inputs_with_state_burn(
+        let (inputs, _, _, change) = super::transaction::select_account_inputs_with_vm_state_burn(
             rpc,
             wallet,
             fee.checked_add(vm_fuel)
                 .ok_or("fee plus VM fuel burn overflow")?,
-            1,
+            1_u64
+                .checked_add(vm_created)
+                .ok_or("VM output count overflow")?,
             growth,
             archival,
+            vm_consumed,
         )?;
         let outputs = if change > 0 {
             vec![CoinOutput::new(wallet.address(), Zeno::from_zeno(change))]
@@ -148,6 +153,13 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
 }
 
 pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
+    if command == "program-account" {
+        let id = option(args, "--program-id").ok_or("missing --program-id")?;
+        let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+        let value: serde_json::Value = http_get_json(rpc, &format!("/program/account/{id}"))?;
+        super::cli::print_human_json(&value);
+        return Ok(());
+    }
     if command == "program-deploy" {
         return super::deploy::deploy_program(args);
     }
@@ -236,7 +248,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                 &Mint {
                     asset: id,
                     nonce,
-                    recipient: Owner::Address(recipient(args)?),
+                    recipient: recipient(args)?,
                     amount: amount(args, "--amount")?,
                 },
             )?
@@ -254,11 +266,11 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
             }
             let sent = required.unwrap_or(total);
             let to = if command == "program-consolidate" {
-                wallet.address()
+                Owner::Address(wallet.address())
             } else {
                 recipient(args)?
             };
-            let mut outputs = vec![AssetOutput::new(Owner::Address(to), sent)];
+            let mut outputs = vec![AssetOutput::new(to, sent)];
             let change = total
                 .checked_sub(sent)
                 .ok_or("insufficient program balance")?;

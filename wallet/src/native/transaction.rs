@@ -5,7 +5,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     reject_manual_fee(args)?;
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let recipient = option(args, "--to")
-        .map(|value| address_from_string(value).map_err(|error| error.to_string()))
+        .map(super::util::parse_owner)
         .transpose()?;
     let recipient = recipient.ok_or("missing --to")?;
     let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
@@ -57,7 +57,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
                 change_target.unwrap_or(wallet.address()),
             )
         };
-        let mut outputs = vec![CoinOutput::new(recipient, amount)];
+        let mut outputs = vec![CoinOutput::to_owner(recipient, amount)];
         if change > 0 {
             outputs.push(CoinOutput::new(change_address, Zeno::from_zeno(change)));
         }
@@ -163,6 +163,26 @@ pub(super) fn select_account_inputs_with_state_burn(
     created_state_weight: u64,
     archival_burn: u64,
 ) -> Result<(Vec<kernel::monetary::coin::CoinShare>, u64, u64, u64), String> {
+    select_account_inputs_with_vm_state_burn(
+        rpc,
+        wallet,
+        base_required,
+        created_coin_without_change,
+        created_state_weight,
+        archival_burn,
+        0,
+    )
+}
+
+pub(super) fn select_account_inputs_with_vm_state_burn(
+    rpc: &str,
+    wallet: &LoadedWallet,
+    base_required: u64,
+    created_coin_without_change: u64,
+    created_state_weight: u64,
+    archival_burn: u64,
+    vm_consumed_coin_utxos: u64,
+) -> Result<(Vec<kernel::monetary::coin::CoinShare>, u64, u64, u64), String> {
     let candidates = account_input_candidates(rpc, wallet)?;
     let mut selected = Vec::new();
     let mut total = 0_u64;
@@ -181,7 +201,9 @@ pub(super) fn select_account_inputs_with_state_burn(
             let ledger_burn = StateTransitionWeight {
                 created_coin_utxos: created,
                 consumed_coin_utxos: u64::try_from(selected.len())
-                    .map_err(|_| "coin input count overflow")?,
+                    .map_err(|_| "coin input count overflow")?
+                    .checked_add(vm_consumed_coin_utxos)
+                    .ok_or("VM input count overflow")?,
                 created_state_weight,
                 ..StateTransitionWeight::default()
             }

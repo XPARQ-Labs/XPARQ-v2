@@ -137,6 +137,7 @@ fn validate(call: AssetCall) -> Result<AssetCall, ProgramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Owner;
     use crate::program::system::script::{
         call::{ProgramCall, SystemProgramId},
         execute::{DecodedProgramCall, decode_program},
@@ -212,7 +213,7 @@ mod tests {
         let transfer = Transfer {
             asset,
             inputs: vec![share],
-            outputs: vec![asset::AssetOutput::new(recipient, asset::Unit::ZERO)],
+            outputs: vec![asset::AssetOutput::new(crate::common::Owner::Address(recipient), asset::Unit::ZERO)],
         };
         assert_eq!(
             decode(
@@ -224,7 +225,7 @@ mod tests {
         let transfer = Transfer {
             inputs: vec![share, share],
             outputs: vec![asset::AssetOutput::new(
-                recipient,
+                crate::common::Owner::Address(recipient),
                 asset::Unit::from_units(1),
             )],
             ..transfer

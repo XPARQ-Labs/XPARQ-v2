@@ -55,7 +55,8 @@ fn start(binary: &Path, db: &Path, rpc: &str, p2p: &str) -> Node {
         .spawn()
         .unwrap();
     let mut node = Node(child);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Restart validates the persisted PoW chain before opening RPC.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while TcpStream::connect(rpc).is_err() {
         assert!(node.0.try_wait().unwrap().is_none(), "node exited");
         assert!(Instant::now() < deadline);
@@ -64,6 +65,7 @@ fn start(binary: &Path, db: &Path, rpc: &str, p2p: &str) -> Node {
     node
 }
 fn mine(binary: &Path, db: &Path, address: &str) {
+    eprintln!("confirming pending operations with a mined block");
     let result = Command::new(binary)
         .args(["mine-block", db.to_str().unwrap(), address])
         .output()
@@ -75,6 +77,7 @@ fn mine(binary: &Path, db: &Path, address: &str) {
     );
 }
 fn cli(wallet: &Path, rpc: &str, command: &str, args: &[&str]) -> String {
+    eprintln!("wallet command: {command}");
     let result = Command::new(env!("CARGO_BIN_EXE_wallet"))
         .args([command, "--wallet", wallet.to_str().unwrap(), "--rpc", rpc])
         .args(args)
@@ -495,6 +498,320 @@ fn counter_deploy_and_call_cli_survive_restart() {
             &format!("/explorer/address/{address}?include_emissions=false")
         ),
         history
+    );
+    drop(node);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires node binary; cargo build -p node -p wallet --bins then run explicitly"]
+fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
+    let node_binary = Path::new(env!("CARGO_BIN_EXE_wallet")).with_file_name(if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    });
+    assert!(node_binary.exists(), "build the node binary first");
+    let root = std::env::temp_dir().join(format!(
+        "xparq-contract-cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("data");
+    let file = root.join("wallet.json");
+    let words = wallet::encode_bip39_mnemonic(&[63; 16]).unwrap();
+    let mut owner =
+        wallet::account_wallet_from_bip39_mnemonic(&words, kernel::crypto::Signature::MlDsa44)
+            .unwrap();
+    owner.mnemonic = Some(words);
+    fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
+    let address = kernel::crypto::address_to_string(&owner.address);
+    let receiver = wallet::account_wallet_from_bip39_mnemonic(
+        &wallet::encode_bip39_mnemonic(&[64; 16]).unwrap(),
+        kernel::crypto::Signature::MlDsa44,
+    )
+    .unwrap();
+    let to = kernel::crypto::address_to_string(&receiver.address);
+    mine(&node_binary, &db, &address);
+    let rpc = free();
+    let p2p = free();
+    let mut node = start(&node_binary, &db, &rpc, &p2p);
+    let registered = cli(
+        &file,
+        &rpc,
+        "program-register",
+        &[
+            "--name",
+            "VAULT",
+            "--max-supply",
+            "10",
+            "--initial-mint",
+            "3",
+        ],
+    );
+    let asset = registered
+        .lines()
+        .find_map(|line| line.strip_prefix("program asset: "))
+        .unwrap()
+        .to_string();
+    drop(node);
+    mine(&node_binary, &db, &address);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    // Deploy a contract that pays one coin and two asset units to the receiver.
+    let mut code = b"XPVM".to_vec();
+    code.extend_from_slice(&[2, 1, 0, 0, 0, 0, 0, 0, 0]);
+    code.push(6);
+    code.extend(
+        borsh::to_vec(&kernel::program::vm::TransferRequest {
+            recipient: kernel::common::Owner::Address(receiver.address),
+            amount: 100_000_000,
+        })
+        .unwrap(),
+    );
+    code.push(7);
+    code.extend(hex::decode(&asset).unwrap());
+    code.extend(
+        borsh::to_vec(&kernel::program::vm::TransferRequest {
+            recipient: kernel::common::Owner::Address(receiver.address),
+            amount: 200_000_000,
+        })
+        .unwrap(),
+    );
+    code.push(1);
+    code.extend_from_slice(&0i64.to_le_bytes());
+    code.push(3);
+    let code_path = root.join("vault.xpvm");
+    fs::write(&code_path, code).unwrap();
+    let deployment = cli(
+        &file,
+        &rpc,
+        "program-deploy",
+        &["--code", code_path.to_str().unwrap(), "--nonce", "2"],
+    );
+    let contract = deployment
+        .lines()
+        .find_map(|line| line.strip_prefix("Program ID: "))
+        .unwrap()
+        .to_string();
+    drop(node);
+    mine(&node_binary, &db, &address);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    let recipient = format!("program:{contract}");
+    for (command, args) in [
+        (
+            "sign-spend",
+            vec!["--to", recipient.as_str(), "--amount", "2"],
+        ),
+        (
+            "program-transfer",
+            vec![
+                "--asset",
+                asset.as_str(),
+                "--to",
+                recipient.as_str(),
+                "--amount",
+                "3",
+            ],
+        ),
+        ("program-call", vec!["--program-id", contract.as_str()]),
+    ] {
+        cli(&file, &rpc, command, &args);
+        drop(node);
+        mine(&node_binary, &db, &address);
+        node = start(&node_binary, &db, &rpc, &p2p);
+    }
+    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    assert_eq!(
+        get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
+        "200000000"
+    );
+    let contract_state = get(&rpc, &format!("/program/account/{contract}"));
+    assert_eq!(contract_state["coin_balance"], 100_000_000);
+    assert_eq!(contract_state["asset_shares"][0]["amount"], "100000000");
+    assert!(
+        cli(&file, &rpc, "program-account", &["--program-id", &contract])
+            .contains("Coin Balance: 100000000")
+    );
+
+    // The second call has enough coin but insufficient asset. No leg commits.
+    let failed = Command::new(env!("CARGO_BIN_EXE_wallet"))
+        .args([
+            "program-call",
+            "--wallet",
+            file.to_str().unwrap(),
+            "--rpc",
+            &rpc,
+            "--program-id",
+            &contract,
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{contract}")),
+        contract_state
+    );
+    drop(node);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{contract}")),
+        contract_state
+    );
+    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    assert_eq!(
+        get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
+        "200000000"
+    );
+    drop(node);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires node binary; cargo build -p node -p wallet --bins then run explicitly"]
+fn deployed_contract_registers_and_mints_asset_through_cli() {
+    use kernel::{
+        common::Owner,
+        monetary::asset::{AssetContract, Metadata, Unit},
+        program::ProgramId,
+    };
+    let node_binary = Path::new(env!("CARGO_BIN_EXE_wallet")).with_file_name(if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    });
+    assert!(node_binary.exists(), "build the node binary first");
+    let root = std::env::temp_dir().join(format!(
+        "xparq-issuer-cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("data");
+    let file = root.join("wallet.json");
+    let words = wallet::encode_bip39_mnemonic(&[65; 16]).unwrap();
+    let mut owner =
+        wallet::account_wallet_from_bip39_mnemonic(&words, kernel::crypto::Signature::MlDsa44)
+            .unwrap();
+    owner.mnemonic = Some(words);
+    fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
+    let address = kernel::crypto::address_to_string(&owner.address);
+    let receiver = wallet::account_wallet_from_bip39_mnemonic(
+        &wallet::encode_bip39_mnemonic(&[66; 16]).unwrap(),
+        kernel::crypto::Signature::MlDsa44,
+    )
+    .unwrap();
+    let to = kernel::crypto::address_to_string(&receiver.address);
+    let code_path = root.join("issuer.xpvm");
+    let builder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/asset_issuer/build.py");
+    let built = Command::new("python3")
+        .arg(builder)
+        .args([
+            "--recipient-hex",
+            &hex::encode(receiver.address.0),
+            "--name",
+            "LAUNCH",
+            "--max-supply-units",
+            "1100000000",
+            "--initial-mint-units",
+            "100000000",
+            "--mint-units",
+            "500000000",
+            "--output",
+            code_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    mine(&node_binary, &db, &address);
+    let rpc = free();
+    let p2p = free();
+    let mut node = start(&node_binary, &db, &rpc, &p2p);
+    let deployment = cli(
+        &file,
+        &rpc,
+        "program-deploy",
+        &["--code", code_path.to_str().unwrap(), "--nonce", "1"],
+    );
+    let contract = deployment
+        .lines()
+        .find_map(|line| line.strip_prefix("Program ID: "))
+        .unwrap()
+        .to_string();
+    let id = ProgramId::from_bytes(hex::decode(&contract).unwrap().try_into().unwrap());
+    let actor = Owner::Program(id);
+    let asset = AssetContract::derive(
+        &Metadata::new(
+            "LAUNCH".into(),
+            Unit::from_units(1_100_000_000),
+            actor,
+            actor,
+        )
+        .unwrap(),
+        1,
+    )
+    .unwrap()
+    .to_string();
+    drop(node);
+    mine(&node_binary, &db, &address);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    // No coin deposit: the signed caller payment covers registration, mint and fuel.
+    for (nonce, supply) in [(1, "600000000"), (2, "1100000000")] {
+        cli(&file, &rpc, "program-call", &["--program-id", &contract]);
+        drop(node);
+        mine(&node_binary, &db, &address);
+        node = start(&node_binary, &db, &rpc, &p2p);
+        let record = get(&rpc, &format!("/program/asset/{asset}"));
+        assert_eq!(record["supply"], supply);
+        assert_eq!(record["total_minted"], supply);
+        assert_eq!(record["mint_nonce"], nonce);
+        assert_eq!(record["creator"]["type"], "program");
+        assert_eq!(record["creator"]["value"], contract);
+        assert_eq!(record["mint_authority"], record["creator"]);
+        let account = get(&rpc, &format!("/program/account/{contract}"));
+        assert_eq!(account["coin_balance"], 0);
+        assert_eq!(account["asset_shares"][0]["amount"], "100000000");
+        assert_eq!(
+            get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
+            (nonce * 500_000_000u64).to_string()
+        );
+    }
+    let record = get(&rpc, &format!("/program/asset/{asset}"));
+    let account = get(&rpc, &format!("/program/account/{contract}"));
+    let payer = get(&rpc, &format!("/account/{address}"));
+    let failed = Command::new(env!("CARGO_BIN_EXE_wallet"))
+        .args([
+            "program-call",
+            "--wallet",
+            file.to_str().unwrap(),
+            "--rpc",
+            &rpc,
+            "--program-id",
+            &contract,
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(get(&rpc, &format!("/program/asset/{asset}")), record);
+    assert_eq!(get(&rpc, &format!("/program/account/{contract}")), account);
+    assert_eq!(get(&rpc, &format!("/account/{address}")), payer);
+    drop(node);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    assert_eq!(get(&rpc, &format!("/program/asset/{asset}")), record);
+    assert_eq!(get(&rpc, &format!("/program/account/{contract}")), account);
+    assert_eq!(
+        get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
+        "1000000000"
     );
     drop(node);
     fs::remove_dir_all(root).unwrap();

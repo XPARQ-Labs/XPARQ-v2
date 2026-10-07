@@ -340,7 +340,7 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     let original_tip = altered.tip_hash().unwrap();
     let (coin_id, coin) = altered.state.utxos.coins().next().expect("emission coin");
     let mut coin = *coin;
-    coin.owner = Address([0xa2; kernel::crypto::ADDRESS_SIZE]);
+    coin.owner = kernel::common::Owner::Address(Address([0xa2; kernel::crypto::ADDRESS_SIZE]));
     // Forge a serialized fixture without exposing ledger mutation APIs.
     let mut coins: std::collections::BTreeMap<_, _> = altered
         .state
@@ -1682,7 +1682,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
         .state()
         .utxos()
         .coins()
-        .find(|(_, coin)| coin.owner == owner)
+        .find(|(_, coin)| coin.owner == kernel::common::Owner::Address(owner))
         .unwrap();
     let input_amount = coin.amount.as_zeno();
     let mut code = b"XPVM".to_vec();

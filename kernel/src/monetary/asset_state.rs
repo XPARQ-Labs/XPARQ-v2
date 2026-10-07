@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crypto::{Address, HASH_SIZE};
+use crypto::HASH_SIZE;
+#[cfg(test)]
+use crypto::Address;
 
 use super::asset::{AssetContract, AssetError, AssetShare, Metadata, Share, Unit};
 
@@ -46,7 +48,7 @@ pub struct AssetState {
     pub(crate) shares: BTreeMap<Share, AssetShare>,
 }
 
-/// The caller must authenticate `signer` and bind `commitment` to this call.
+/// The kernel must authenticate the caller and bind `commitment` to this call.
 ///
 /// `actor` is the ledger principal whose authority is exercised by the call.
 /// For a direct user action it is `Owner::Address(signer)`; for a program action
@@ -54,8 +56,6 @@ pub struct AssetState {
 /// bind the actor to the authenticated execution path.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExecutionContext {
-    #[allow(dead_code)]
-    pub signer: Address,
     pub actor: Owner,
     pub commitment: [u8; HASH_SIZE],
 }
@@ -66,6 +66,25 @@ pub struct AssetJournal {
     records: Vec<(AssetContract, Option<AssetRecord>)>,
 
     shares: Vec<(Share, Option<AssetShare>)>,
+}
+
+impl AssetJournal {
+    /// Compose sequential operations while preserving each key's pre-call value.
+    /// A later snapshot must not replace the original rollback value.
+    pub(crate) fn merge(self, next: Self) -> Self {
+        let mut records: BTreeMap<_, _> = self.records.into_iter().collect();
+        for (key, previous) in next.records {
+            records.entry(key).or_insert(previous);
+        }
+        let mut shares: BTreeMap<_, _> = self.shares.into_iter().collect();
+        for (key, previous) in next.shares {
+            shares.entry(key).or_insert(previous);
+        }
+        Self {
+            records: records.into_iter().collect(),
+            shares: shares.into_iter().collect(),
+        }
+    }
 }
 
 impl AssetState {
@@ -482,7 +501,6 @@ mod tests {
         let owner = Address([1; crypto::ADDRESS_SIZE]);
 
         let context = |byte| ExecutionContext {
-            signer: owner,
             actor: Owner::Address(owner),
             commitment: [byte; HASH_SIZE],
         };
@@ -551,7 +569,6 @@ mod tests {
         let owner = Address([1; crypto::ADDRESS_SIZE]);
 
         let context = |byte| ExecutionContext {
-            signer: owner,
             actor: Owner::Address(owner),
             commitment: [byte; HASH_SIZE],
         };
@@ -619,7 +636,6 @@ mod tests {
         let owner = Address([1; crypto::ADDRESS_SIZE]);
 
         let context = ExecutionContext {
-            signer: owner,
             actor: Owner::Address(owner),
             commitment: [1; HASH_SIZE],
         };
@@ -725,7 +741,6 @@ mod tests {
                         nonce: seed,
                     }),
                     ExecutionContext {
-                        signer: owners[0],
                         actor: Owner::Address(owners[0]),
                         commitment: [0; HASH_SIZE],
                     },
@@ -847,7 +862,6 @@ mod tests {
                     .apply(
                         &call,
                         ExecutionContext {
-                            signer,
                             actor: Owner::Address(signer),
                             commitment,
                         },
@@ -909,7 +923,6 @@ mod tests {
         let receiver = Address::from_bytes([2; crypto::ADDRESS_SIZE]);
 
         let context = |signer, byte| ExecutionContext {
-            signer,
             actor: Owner::Address(signer),
             commitment: [byte; HASH_SIZE],
         };

@@ -31,7 +31,7 @@ mod payment_tests {
                 name: "STAGED".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
-                mint_authority: signer,
+                mint_authority: crate::common::Owner::Address(signer),
                 nonce: 1,
             })
             .unwrap(),
@@ -42,7 +42,7 @@ mod payment_tests {
             .insert_coin(
                 input,
                 CoinUtxo {
-                    owner: signer,
+                    owner: crate::common::Owner::Address(signer),
                     amount: Zeno::from_zeno(1_000_000),
                 },
             )
@@ -79,7 +79,7 @@ mod payment_tests {
             .apply(
                 &decoded,
                 ExecutionContext {
-                    signer,
+ actor: crate::common::Owner::Address(signer),
                     commitment: [1; 32],
                 },
             )
@@ -194,7 +194,7 @@ mod xpq_transfer_tests {
             .insert_coin(
                 input,
                 CoinUtxo {
-                    owner,
+                    owner: crate::common::Owner::Address(owner),
                     amount: Zeno::from_zeno(amount),
                 },
             )
@@ -389,7 +389,7 @@ mod xpq_transfer_tests {
         let transferred: Vec<_> = state
             .utxos
             .coins()
-            .filter(|(_, coin)| coin.owner == recipient)
+            .filter(|(_, coin)| coin.owner == crate::common::Owner::Address(recipient))
             .collect();
         assert_eq!(transferred.len(), 1);
         assert_eq!(transferred[0].1.amount, amount);
@@ -418,7 +418,7 @@ mod xpq_transfer_tests {
             .insert_coin(
                 input,
                 CoinUtxo {
-                    owner: Address([97; crypto::ADDRESS_SIZE]),
+                    owner: crate::common::Owner::Address(Address([97; crypto::ADDRESS_SIZE])),
                     amount: Zeno::from_zeno(1_000_000),
                 },
             )

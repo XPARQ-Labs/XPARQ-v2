@@ -67,7 +67,9 @@ fn transaction_addresses(
     addresses.insert(sender);
 
     for output in outputs {
-        addresses.insert(explorer::output_recipient(&output));
+        if let Some(address) = explorer::output_recipient(&output) {
+            addresses.insert(address);
+        }
     }
 
     Ok(addresses)

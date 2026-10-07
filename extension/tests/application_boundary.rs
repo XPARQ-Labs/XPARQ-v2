@@ -1,5 +1,5 @@
 use kernel::{
-    common::ChainContext,
+    common::{ChainContext, Owner},
     consensus::{ProtocolBurn, StateTransitionWeight},
     crypto::{
         AccountSignatureScheme, Address, SigningSeed, address_from_public_key, canonical_bytes,
@@ -33,7 +33,7 @@ fn funded() -> LedgerState {
     let amount = Zeno::from_zeno(10_000_000);
     let coins = std::collections::BTreeMap::from([(
         CoinShare::from_bytes([1; 16]),
-        CoinUtxo { owner, amount },
+        CoinUtxo { owner: kernel::common::Owner::Address(owner), amount },
     )]);
     LedgerState {
         utxos: canonical_decode(&canonical_bytes(&(coins, amount)).unwrap()).unwrap(),
@@ -52,7 +52,7 @@ fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvoca
     let (input, coin) = state
         .utxos
         .coins()
-        .find(|(_, coin)| coin.owner == signer)
+        .find(|(_, coin)| coin.owner == kernel::common::Owner::Address(signer))
         .unwrap();
     let fee = Zeno::ONE;
     let build = |burn: u64| {
@@ -117,7 +117,7 @@ impl ApplicationExecutor for BadApplication {
         &self,
         host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
-        outputs: &[(Address, u64)],
+        outputs: &[(Owner, u64)],
         miner: Address,
         fee: u64,
     ) -> Result<(), TransferError<StateError>> {
@@ -126,7 +126,7 @@ impl ApplicationExecutor for BadApplication {
         }
         let mut outputs = outputs.to_vec();
         if matches!(self, Self::RedirectCoin) {
-            outputs[0].0 = Address::ZERO;
+            outputs[0].0 = Owner::Address(Address::ZERO);
         }
         extension::coin_program::execute_transfer(host, inputs, &outputs, miner, fee)
     }
@@ -159,7 +159,7 @@ fn register_call() -> ProgramCall {
             name: "BOUNDARY".into(),
             max_supply: Unit::from_units(100),
             initial_mint: Unit::from_units(10),
-            mint_authority: owner,
+            mint_authority: kernel::common::Owner::Address(owner),
             nonce: 1,
         })
         .unwrap(),
@@ -235,7 +235,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
     let chain = ChainContext::new([7; 32]);
     let mut variants = Vec::new();
     let mut changed = tx.clone();
-    changed.payment.outputs[0].output = Address::ZERO;
+    changed.payment.outputs[0].output = kernel::common::Owner::Address(Address::ZERO);
     variants.push((changed, chain));
     let mut changed = tx.clone();
     changed.payment.inputs.push(changed.payment.inputs[0]);
@@ -348,7 +348,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         payload: canonical_bytes(&Mint {
             asset,
             nonce: 1,
-            recipient: owner,
+            recipient: kernel::common::Owner::Address(owner),
             amount: Unit::from_units(5),
         })
         .unwrap(),
@@ -373,7 +373,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
     stale.payload = canonical_bytes(&Mint {
         asset,
         nonce: 1,
-        recipient: owner,
+        recipient: kernel::common::Owner::Address(owner),
         amount: Unit::from_units(5),
     })
     .unwrap();
@@ -384,7 +384,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
             state
                 .utxos
                 .coins()
-                .find(|(_, c)| c.owner == owner)
+                .find(|(_, c)| c.owner == kernel::common::Owner::Address(owner))
                 .unwrap()
                 .0,
         ],

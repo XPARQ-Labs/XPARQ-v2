@@ -377,9 +377,9 @@ mod tests {
 
     #[test]
     fn xparq_consensus_rejects_target_above_pow_limit() {
-        // Easier than 0x2000ffff.
+        // Easier than the current PoW limit.
         assert!(
-            PoWTarget::from_consensus_compact(0x2001_ffff).is_none()
+            PoWTarget::from_consensus_compact(POW_LIMIT_BITS + 1).is_none()
         );
     }
 
@@ -539,7 +539,7 @@ mod tests {
         let targets = [
             0x1d00_ffff,
             POW_LIMIT_BITS,
-            0x2000_7fff,
+            0x1f7f_ff00,
             0x1f12_3456,
         ];
 

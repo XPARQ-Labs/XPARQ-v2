@@ -132,10 +132,10 @@ mod tests {
     fn recipient_resolves_block_miner_at_application_time() {
         let miner = Address([9; crypto::ADDRESS_SIZE]);
 
-        assert_eq!(Recipient::BlockMiner.resolve(miner), miner);
+        assert_eq!(Recipient::BlockMiner.resolve(miner), crate::common::Owner::Address(miner));
         assert_eq!(
             Recipient::Address(Address::ZERO).resolve(miner),
-            Address::ZERO
+            crate::common::Owner::Address(Address::ZERO)
         );
     }
 }

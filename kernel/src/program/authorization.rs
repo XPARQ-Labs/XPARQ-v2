@@ -276,7 +276,7 @@ mod program_transaction_tests {
                 name: "PROGRAM".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
-                mint_authority: signer,
+                mint_authority: crate::common::Owner::Address(signer),
                 nonce: 1,
             })
             .unwrap(),

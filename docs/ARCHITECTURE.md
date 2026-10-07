@@ -44,5 +44,8 @@ changes and commits only after validation succeeds. Journals restore prior state
 on rollback. The same installed applications serve mempool, execution, replay and
 RPC asset state-growth quotes.
 
-XPVM v1 runs in kernel and can propose a scalar program-state effect. It does not
-call CoinHost/AssetHost. See [ProgramCall](PROGRAM_CALL.md) and [XPVM](XPVM.md).
+XPVM runs in kernel and can propose a scalar program-state effect. Version 2
+also proposes fixed coin and asset payouts from the executing program’s own
+shares. Version 3 adds program-owned asset registration and minting; kernel binds
+authority to the executing program, selects mint nonces and checks lifetime supply.
+The kernel settles all effects atomically with caller payment and state changes. See [ProgramCall](PROGRAM_CALL.md) and [XPVM](XPVM.md).
