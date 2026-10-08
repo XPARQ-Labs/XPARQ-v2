@@ -1,12 +1,15 @@
 //! Canonical UTXO ledger state.
 
 pub mod applied;
-pub mod ledger;
+#[path = "ledger.rs"]
+pub mod canonical;
+// Preserve the existing public module path for downstream Rust callers.
+pub use canonical as ledger;
 mod state;
 pub mod utxo;
 
 pub use crate::error::StateError;
-pub use ledger::*;
+pub use canonical::*;
 pub use state::*;
 pub use utxo::*;
 

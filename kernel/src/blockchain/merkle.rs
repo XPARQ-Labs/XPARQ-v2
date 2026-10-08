@@ -105,13 +105,13 @@ fn merkle_parent(left: Hash, right: Hash, hash_domain: HashDomain) -> Hash {
 
 fn merkle_parent_level(level: &[Hash], hash_domain: HashDomain) -> Vec<Hash> {
     let mut parents = Vec::with_capacity(level.len().div_ceil(2));
-    let mut pairs = level.chunks_exact(2);
+    let (pairs, remainder) = level.as_chunks::<2>();
 
-    for pair in &mut pairs {
+    for pair in pairs {
         parents.push(merkle_parent(pair[0], pair[1], hash_domain));
     }
 
-    if let [last] = pairs.remainder() {
+    if let [last] = remainder {
         parents.push(*last);
     }
 

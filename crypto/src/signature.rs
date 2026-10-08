@@ -3,19 +3,11 @@ use std::io::{self, Read, Write};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::agility::{SignatureScheme, account_signature_scheme_supported};
-use ml_dsa::{
-    Keypair, MlDsa44, MlDsa65, MlDsa87, SignatureEncoding, Signer, SigningKey, Verifier,
-    VerifyingKey,
+pub use crate::mldsa::{
+    ML_DSA_44_PUBLIC_KEY_SIZE, ML_DSA_44_SIGNATURE_SIZE, ML_DSA_65_PUBLIC_KEY_SIZE,
+    ML_DSA_65_SIGNATURE_SIZE, ML_DSA_87_PUBLIC_KEY_SIZE, ML_DSA_87_SIGNATURE_SIZE,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
-
-pub const ML_DSA_44_PUBLIC_KEY_SIZE: usize = 1312;
-pub const ML_DSA_65_PUBLIC_KEY_SIZE: usize = 1952;
-pub const ML_DSA_87_PUBLIC_KEY_SIZE: usize = 2592;
-
-pub const ML_DSA_44_SIGNATURE_SIZE: usize = 2420;
-pub const ML_DSA_65_SIGNATURE_SIZE: usize = 3309;
-pub const ML_DSA_87_SIGNATURE_SIZE: usize = 4627;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -26,25 +18,47 @@ pub enum AccountSignatureScheme {
     MlDsa44 = 1,
     MlDsa65 = 2,
     MlDsa87 = 3,
+    SlhDsaShake128s = 5,
+    SlhDsaShake192s = 6,
+    SlhDsaShake256s = 7,
 }
 
 impl AccountSignatureScheme {
-    pub const ALL: [Self; 3] = [Self::MlDsa44, Self::MlDsa65, Self::MlDsa87];
+    pub const ALL: [Self; 6] = [
+        Self::MlDsa44,
+        Self::MlDsa65,
+        Self::MlDsa87,
+        Self::SlhDsaShake128s,
+        Self::SlhDsaShake192s,
+        Self::SlhDsaShake256s,
+    ];
+    pub const fn is_slh_dsa(self) -> bool {
+        matches!(
+            self,
+            Self::SlhDsaShake128s | Self::SlhDsaShake192s | Self::SlhDsaShake256s
+        )
+    }
 
     /// Frozen protocol identifier. Never change or reuse an existing ID.
     pub const fn id(self) -> u8 {
         match self {
             Self::MlDsa44 => 1,
             Self::MlDsa65 => 2,
+            Self::SlhDsaShake128s => 5,
+            Self::SlhDsaShake192s => 6,
+            Self::SlhDsaShake256s => 7,
             Self::MlDsa87 => 3,
         }
     }
 
-    /// Canonical consensus-facing registry entry for this ML-DSA account scheme.
+    /// Canonical consensus-facing registry entry for this account scheme.
     pub const fn registry_scheme(self) -> SignatureScheme {
         match self {
             Self::MlDsa44 => SignatureScheme::MlDsa44,
             Self::MlDsa65 => SignatureScheme::MlDsa65,
+            Self::SlhDsaShake128s => SignatureScheme::SlhDsaShake128s,
+            Self::SlhDsaShake192s => SignatureScheme::SlhDsaShake192s,
+            Self::SlhDsaShake256s => SignatureScheme::SlhDsaShake256s,
             Self::MlDsa87 => SignatureScheme::MlDsa87,
         }
     }
@@ -56,6 +70,9 @@ impl TryFrom<u8> for AccountSignatureScheme {
         match value {
             1 => Ok(Self::MlDsa44),
             2 => Ok(Self::MlDsa65),
+            5 => Ok(Self::SlhDsaShake128s),
+            6 => Ok(Self::SlhDsaShake192s),
+            7 => Ok(Self::SlhDsaShake256s),
             3 => Ok(Self::MlDsa87),
             _ => Err(crate::CryptoError::InvalidAccountScheme),
         }
@@ -75,9 +92,12 @@ impl TryFrom<SignatureScheme> for AccountSignatureScheme {
         match value {
             SignatureScheme::MlDsa44 => Ok(Self::MlDsa44),
             SignatureScheme::MlDsa65 => Ok(Self::MlDsa65),
+            SignatureScheme::SlhDsaShake128s => Ok(Self::SlhDsaShake128s),
+            SignatureScheme::SlhDsaShake192s => Ok(Self::SlhDsaShake192s),
+            SignatureScheme::SlhDsaShake256s => Ok(Self::SlhDsaShake256s),
             SignatureScheme::MlDsa87 => Ok(Self::MlDsa87),
             SignatureScheme::SqisignLevel5 => {
-                Err("signature scheme is not handled by the ML-DSA account API")
+                Err("signature scheme is not handled by the account signature API")
             }
         }
     }
@@ -92,6 +112,9 @@ impl AccountSignatureScheme {
         match self {
             Self::MlDsa44 => "mldsa44",
             Self::MlDsa65 => "mldsa65",
+            Self::SlhDsaShake128s => "slhdsa-shake128s",
+            Self::SlhDsaShake192s => "slhdsa-shake192s",
+            Self::SlhDsaShake256s => "slhdsa-shake256s",
             Self::MlDsa87 => "mldsa87",
         }
     }
@@ -104,6 +127,9 @@ impl AccountSignatureScheme {
         match self {
             Self::MlDsa44 => ML_DSA_44_PUBLIC_KEY_SIZE,
             Self::MlDsa65 => ML_DSA_65_PUBLIC_KEY_SIZE,
+            Self::SlhDsaShake128s => 32,
+            Self::SlhDsaShake192s => 48,
+            Self::SlhDsaShake256s => 64,
             Self::MlDsa87 => ML_DSA_87_PUBLIC_KEY_SIZE,
         }
     }
@@ -112,6 +138,9 @@ impl AccountSignatureScheme {
         match self {
             Self::MlDsa44 => ML_DSA_44_SIGNATURE_SIZE,
             Self::MlDsa65 => ML_DSA_65_SIGNATURE_SIZE,
+            Self::SlhDsaShake128s => 7856,
+            Self::SlhDsaShake192s => 16224,
+            Self::SlhDsaShake256s => 29792,
             Self::MlDsa87 => ML_DSA_87_SIGNATURE_SIZE,
         }
     }
@@ -124,6 +153,9 @@ impl std::str::FromStr for AccountSignatureScheme {
         match value.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
             "mldsa44" => Ok(Self::MlDsa44),
             "mldsa65" => Ok(Self::MlDsa65),
+            "slhdsashake128s" => Ok(Self::SlhDsaShake128s),
+            "slhdsashake192s" => Ok(Self::SlhDsaShake192s),
+            "slhdsashake256s" => Ok(Self::SlhDsaShake256s),
             "mldsa87" => Ok(Self::MlDsa87),
             _ => Err("unknown signature scheme"),
         }
@@ -238,9 +270,15 @@ impl BorshDeserialize for AccountSignature {
     }
 }
 
+enum PreparedSigningKey {
+    MlDsa(crate::mldsa::PreparedKey),
+    SlhDsa(crate::slhdsa::PreparedKey),
+}
+
 pub struct SigningSeed {
     account: AccountSignatureScheme,
     seed: Box<[u8; 32]>,
+    prepared: std::sync::OnceLock<PreparedSigningKey>,
 }
 
 impl Drop for SigningSeed {
@@ -262,7 +300,11 @@ impl std::fmt::Debug for SigningSeed {
 
 impl SigningSeed {
     pub fn new(account: AccountSignatureScheme, seed: Box<[u8; 32]>) -> Self {
-        Self { account, seed }
+        Self {
+            account,
+            seed,
+            prepared: std::sync::OnceLock::new(),
+        }
     }
 
     pub const fn scheme(&self) -> AccountSignatureScheme {
@@ -275,11 +317,38 @@ impl SigningSeed {
     }
 
     pub fn public_key(&self) -> PublicKey {
-        public_key_from_seed(self.account, self.seed.as_ref())
+        let bytes = match self.prepared_key() {
+            PreparedSigningKey::MlDsa(key) => key.public_key_bytes(),
+            PreparedSigningKey::SlhDsa(key) => key.public_key_bytes(),
+        };
+        PublicKey {
+            account: self.account,
+            bytes,
+        }
     }
 
     pub fn sign(&self, message: &[u8]) -> AccountSignature {
-        sign_from_seed(self.account, self.seed.as_ref(), message)
+        let bytes = match self.prepared_key() {
+            PreparedSigningKey::MlDsa(key) => key.sign_bytes(message),
+            PreparedSigningKey::SlhDsa(key) => key.sign_bytes(message),
+        };
+        AccountSignature {
+            account: self.account,
+            bytes,
+        }
+    }
+
+    fn prepared_key(&self) -> &PreparedSigningKey {
+        self.prepared.get_or_init(|| {
+            if self.account.is_slh_dsa() {
+                PreparedSigningKey::SlhDsa(crate::slhdsa::PreparedKey::new(
+                    self.account,
+                    &self.seed,
+                ))
+            } else {
+                PreparedSigningKey::MlDsa(crate::mldsa::PreparedKey::new(self.account, &self.seed))
+            }
+        })
     }
 
     pub fn dangerous_export_seed(&self) -> Zeroizing<[u8; 32]> {
@@ -292,98 +361,34 @@ impl SigningSeed {
 }
 
 pub fn public_key_from_seed(account: AccountSignatureScheme, seed: &[u8; 32]) -> PublicKey {
-    let seed = Zeroizing::new((*seed).into());
-    let bytes = match account {
-        AccountSignatureScheme::MlDsa44 => SigningKey::<MlDsa44>::from_seed(&seed)
-            .verifying_key()
-            .encode()
-            .to_vec(),
-        AccountSignatureScheme::MlDsa65 => SigningKey::<MlDsa65>::from_seed(&seed)
-            .verifying_key()
-            .encode()
-            .to_vec(),
-        AccountSignatureScheme::MlDsa87 => SigningKey::<MlDsa87>::from_seed(&seed)
-            .verifying_key()
-            .encode()
-            .to_vec(),
-    };
-
-    debug_assert_eq!(bytes.len(), account.public_key_size());
-
-    PublicKey { account, bytes }
+    if account.is_slh_dsa() {
+        crate::slhdsa::public_key_from_seed(account, seed)
+    } else {
+        crate::mldsa::public_key_from_seed(account, seed)
+    }
 }
-
 pub fn sign_from_seed(
     account: AccountSignatureScheme,
     seed: &[u8; 32],
     message: &[u8],
 ) -> AccountSignature {
-    let seed = Zeroizing::new((*seed).into());
-    let bytes = match account {
-        AccountSignatureScheme::MlDsa44 => {
-            let key = SigningKey::<MlDsa44>::from_seed(&seed);
-            let sig: ml_dsa::Signature<MlDsa44> = key.sign(message);
-            sig.to_bytes().to_vec()
-        }
-        AccountSignatureScheme::MlDsa65 => {
-            let key = SigningKey::<MlDsa65>::from_seed(&seed);
-            let sig: ml_dsa::Signature<MlDsa65> = key.sign(message);
-            sig.to_bytes().to_vec()
-        }
-        AccountSignatureScheme::MlDsa87 => {
-            let key = SigningKey::<MlDsa87>::from_seed(&seed);
-            let sig: ml_dsa::Signature<MlDsa87> = key.sign(message);
-            sig.to_bytes().to_vec()
-        }
-    };
-
-    debug_assert_eq!(bytes.len(), account.signature_size());
-
-    AccountSignature { account, bytes }
+    if account.is_slh_dsa() {
+        crate::slhdsa::sign_from_seed(account, seed, message)
+    } else {
+        crate::mldsa::sign_from_seed(account, seed, message)
+    }
 }
-
 pub fn verify(public_key: &PublicKey, message: &[u8], signature: &AccountSignature) -> bool {
-    if public_key.scheme() != signature.scheme() {
+    if public_key.scheme() != signature.scheme()
+        || !public_key.is_valid_encoding()
+        || !signature.is_valid_encoding()
+    {
         return false;
     }
-
-    if !public_key.is_valid_encoding() || !signature.is_valid_encoding() {
-        return false;
-    }
-
-    macro_rules! verify_ml {
-        ($params:ty, $pk_size:expr, $sig_size:expr) => {{
-            let Ok(public): Result<[u8; $pk_size], _> = public_key.bytes.as_slice().try_into()
-            else {
-                return false;
-            };
-
-            let Ok(encoded_signature): Result<[u8; $sig_size], _> =
-                signature.bytes.as_slice().try_into()
-            else {
-                return false;
-            };
-
-            let key = VerifyingKey::<$params>::decode(&public.into());
-            let Some(decoded) = ml_dsa::Signature::<$params>::decode(&encoded_signature.into())
-            else {
-                return false;
-            };
-
-            key.verify(message, &decoded).is_ok()
-        }};
-    }
-
-    match public_key.scheme() {
-        AccountSignatureScheme::MlDsa44 => {
-            verify_ml!(MlDsa44, ML_DSA_44_PUBLIC_KEY_SIZE, ML_DSA_44_SIGNATURE_SIZE)
-        }
-        AccountSignatureScheme::MlDsa65 => {
-            verify_ml!(MlDsa65, ML_DSA_65_PUBLIC_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE)
-        }
-        AccountSignatureScheme::MlDsa87 => {
-            verify_ml!(MlDsa87, ML_DSA_87_PUBLIC_KEY_SIZE, ML_DSA_87_SIGNATURE_SIZE)
-        }
+    if public_key.scheme().is_slh_dsa() {
+        crate::slhdsa::verify(public_key, message, signature)
+    } else {
+        crate::mldsa::verify(public_key, message, signature)
     }
 }
 
@@ -397,6 +402,59 @@ fn invalid_length(kind: &str, expected: usize, actual: usize) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_keys_reuse_one_session_and_preserve_wire_signatures() {
+        fn zeroizes<T: ZeroizeOnDrop>() {}
+        zeroizes::<ml_dsa::SigningKey<ml_dsa::MlDsa44>>();
+        zeroizes::<ml_dsa::SigningKey<ml_dsa::MlDsa65>>();
+        zeroizes::<ml_dsa::SigningKey<ml_dsa::MlDsa87>>();
+        zeroizes::<slh_dsa::SigningKey<slh_dsa::Shake128s>>();
+        zeroizes::<slh_dsa::SigningKey<slh_dsa::Shake192s>>();
+        zeroizes::<slh_dsa::SigningKey<slh_dsa::Shake256s>>();
+        for scheme in AccountSignatureScheme::ALL {
+            let wallet = SigningSeed::new(scheme, Box::new([42; 32]));
+            assert!(wallet.prepared.get().is_none());
+            let public = wallet.public_key();
+            let first = wallet.prepared_key() as *const PreparedSigningKey;
+            assert_eq!(wallet.public_key(), public);
+            let signature = wallet.sign(b"cached signing session");
+            assert_eq!(first, wallet.prepared_key() as *const PreparedSigningKey);
+            assert_eq!(
+                signature,
+                sign_from_seed(scheme, &[42; 32], b"cached signing session")
+            );
+            let changed = wallet.sign(b"another commitment");
+            assert!(verify(&public, b"another commitment", &changed));
+            assert!(!verify(&public, b"cached signing session", &changed));
+            let debug = format!("{wallet:?}");
+            assert!(debug.contains("REDACTED"));
+            assert!(!debug.contains("PreparedKey"));
+            drop(wallet);
+            assert!(verify(&public, b"cached signing session", &signature));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual signing-session timing; optimized crypto packages"]
+    fn benchmark_slh256_signing_session() {
+        let scheme = AccountSignatureScheme::SlhDsaShake256s;
+        let start = std::time::Instant::now();
+        let public = public_key_from_seed(scheme, &[42; 32]);
+        let uncached: Vec<_> = (0..3)
+            .map(|i| sign_from_seed(scheme, &[42; 32], &[i; 32]))
+            .collect();
+        let uncached_time = start.elapsed();
+        let start = std::time::Instant::now();
+        let wallet = SigningSeed::new(scheme, Box::new([42; 32]));
+        assert_eq!(public, wallet.public_key());
+        let cached: Vec<_> = (0..3).map(|i| wallet.sign(&[i; 32])).collect();
+        let cached_time = start.elapsed();
+        assert_eq!(uncached, cached);
+        println!(
+            "SHAKE256s public key + 3 signatures: uncached={uncached_time:?}, cached={cached_time:?}"
+        );
+    }
 
     #[test]
     fn all_account_derive_sign_and_reject_tampering() {
@@ -494,6 +552,47 @@ mod tests {
 #[cfg(test)]
 mod hardening_tests {
     use super::*;
+
+    #[test]
+    fn every_registered_scheme_has_bounded_canonical_encoding() {
+        for scheme in AccountSignatureScheme::ALL {
+            assert!(scheme.supported());
+            assert_eq!(
+                scheme.as_str().parse::<AccountSignatureScheme>().unwrap(),
+                scheme
+            );
+            assert_eq!(
+                AccountSignatureScheme::try_from(scheme.registry_scheme()).unwrap(),
+                scheme
+            );
+            let public = PublicKey {
+                account: scheme,
+                bytes: vec![0; scheme.public_key_size()],
+            };
+            let signature = AccountSignature {
+                account: scheme,
+                bytes: vec![0; scheme.signature_size()],
+            };
+            assert_eq!(
+                PublicKey::try_from_slice(&borsh::to_vec(&public).unwrap()).unwrap(),
+                public
+            );
+            assert_eq!(
+                AccountSignature::try_from_slice(&borsh::to_vec(&signature).unwrap()).unwrap(),
+                signature
+            );
+            for size in [
+                0u32,
+                (scheme.signature_size() - 1) as u32,
+                (scheme.signature_size() + 1) as u32,
+                u32::MAX,
+            ] {
+                let mut bytes = vec![scheme.id()];
+                bytes.extend_from_slice(&size.to_le_bytes());
+                assert!(AccountSignature::try_from_slice(&bytes).is_err());
+            }
+        }
+    }
     use borsh::BorshDeserialize;
 
     const MESSAGE: &[u8] = b"xparq signature hardening";

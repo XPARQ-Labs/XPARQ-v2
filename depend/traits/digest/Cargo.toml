@@ -60,7 +60,7 @@ path = "src/lib.rs"
 version = "0.12"
 optional = true
 
-path = "../../utils/block-buffer"
+path = "../../utils/block-buffer-0.12"
 [dependencies.common]
 version = "0.2"
 package = "crypto-common"

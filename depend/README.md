@@ -20,3 +20,10 @@ crate, add its relative directory to that exclusion list.
 `depend/rustfmt.toml` preserves upstream source formatting. `cargo fmt --all`
 may visit local path dependencies, but formatting checks apply normally to the
 first-party workspace crates without rewriting vendored cryptographic source.
+
+SLH-DSA is pinned to RustCrypto `slh-dsa 0.2.0-rc.5` in `slhdsa/slh-dsa`,
+with zeroize enabled. It shares the existing `mldsa/shake` and `keccak` implementations. SHA2/HMAC
+are vendored in `slhdsa/` and enabled only by the explicit benchmark feature;
+`utils/block-buffer-0.12` serves digest 0.11 without replacing block-buffer 0.10
+used by legacy dependencies. See [signature policy](../docs/SIGNATURE_SCHEMES.md)
+for enabled parameters, seed derivation and upstream audit status.

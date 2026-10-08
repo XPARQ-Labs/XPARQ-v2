@@ -36,7 +36,6 @@ pub struct Ledger {
 }
 
 /// Ledger data that cannot be rebuilt from the canonical block log alone.
-
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 
 pub struct LedgerSnapshot {
@@ -656,7 +655,6 @@ impl ProgramStateView for LedgerState {
 
 impl LedgerState {
     /// Cross-check accounting records against independently stored live UTXOs.
-
     pub fn validate_supply_invariants(&self) -> Result<(), LedgerError> {
         self.validate_supply_with_asset_cache(true)
     }
@@ -672,10 +670,8 @@ impl LedgerState {
         if self.coin.supply() != Some(coin_total) || self.utxos.is_empty() != coin_total.is_zero() {
             return Err(LedgerError::CoinSupplyMismatch);
         }
-        if allow_cached {
-            if let Some(result) = self.extensions.assets.validate_incremental_supply() {
-                return result;
-            }
+        if allow_cached && let Some(result) = self.extensions.assets.validate_incremental_supply() {
+            return result;
         }
         self.audit_asset_supply()
     }
@@ -973,7 +969,6 @@ impl From<crypto::CodecError> for LedgerError {
 mod phase4_vectors;
 
 #[cfg(test)]
-
 mod p3e_block_atomicity_tests {
 
     use super::*;

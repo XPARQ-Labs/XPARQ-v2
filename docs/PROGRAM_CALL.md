@@ -100,7 +100,7 @@ recipients even when they receive no XPQ. See [OpenAPI](openapi.json) for routes
 
 ## Storage and compatibility
 
-Current chain spec version is **8**, storage schema **16**, and newly written
+Current chain spec version is **9**, storage schema **17**, and newly written
 snapshot version **3**. The snapshot loader supports the legacy v1 representation
 only when its decoder and chain/schema checks accept it; v2 is not accepted by
 this loader. Snapshots must match chain identity, checksum, canonical log and
@@ -121,7 +121,7 @@ sync/reorg. The three-node program lifecycle passed as part of the network suite
 Rust formatting, Markdown local links and OpenAPI JSON are checked separately.
 Existing vendor warnings remain; these checks do not replace a security audit.
 
-The chain-spec identity fixtures and Phase 4 vectors are reconciled for version 8:
+The chain-spec identity fixtures and Phase 4 vectors are reconciled for version 9:
 `bounded_work_rules_have_frozen_mainnet_chain_spec_identity`,
 `frozen_phase4_vectors_match_execution`, and
 `mainnet_genesis_and_chain_spec_match_the_current_structure` pass.
@@ -150,7 +150,7 @@ have one display/CLI/RPC format: exactly 64 hexadecimal characters. Public RPC
 owner objects have type `program` and a hex value. Legacy wallet-identity endpoints
 are removed; balance/history queries operate on ProgramId.
 
-Chain-spec version 8 and database schema 16 require an updated node and a new
+Chain-spec version 9 and database schema 17 require an updated node and a new
 compatible database. No existing-chain migration is provided.
 
 
@@ -172,4 +172,4 @@ in canonical encoding and 64 hexadecimal characters in CLI/RPC/explorer output.
 The old 16-byte ID encoding is rejected. Canonical coin UTXO state weight is
 73 bytes (32-byte ID, 8-byte amount, 1-byte Owner tag and 32-byte ProgramId).
 State-growth burn automatically uses this weight; archival burn measures the
-updated transaction bytes. Database schema 16 rejects incompatible old storage.
+updated transaction bytes. Database schema 17 rejects incompatible old storage.

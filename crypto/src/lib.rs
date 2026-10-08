@@ -3,8 +3,10 @@ pub mod argon2;
 pub mod codec;
 mod error;
 pub mod hash;
+pub mod mldsa;
 pub mod program_id;
 pub mod signature;
+pub mod slhdsa;
 
 pub mod crypto {
     pub use crate::*;

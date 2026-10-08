@@ -37,6 +37,11 @@ pub const MAX_ACTIONS: usize = 256;
 pub const CALL_COST: u64 = 20;
 const HEADER: usize = 13;
 type Storage = BTreeMap<Vec<u8>, Vec<u8>>;
+type CoinAccount = (u64, BTreeSet<(Reverse<u64>, CoinShare)>);
+type AssetAccount = (
+    u128,
+    BTreeSet<(Reverse<u128>, crate::monetary::asset::Share)>,
+);
 
 pub fn valid_storage(storage: &Storage) -> bool {
     storage.len() <= MAX_STORAGE_ENTRIES
@@ -239,14 +244,8 @@ struct Engine<'a> {
     active: Vec<ProgramId>,
     accounts_ready: BTreeSet<ProgramId>,
     // Per-invocation lookup cache, rebuilt from canonical state. Never serialized.
-    coins: BTreeMap<ProgramId, (u64, BTreeSet<(Reverse<u64>, CoinShare)>)>,
-    assets: BTreeMap<
-        (ProgramId, AssetContract),
-        (
-            u128,
-            BTreeSet<(Reverse<u128>, crate::monetary::asset::Share)>,
-        ),
-    >,
+    coins: BTreeMap<ProgramId, CoinAccount>,
+    assets: BTreeMap<(ProgramId, AssetContract), AssetAccount>,
     consumed: BTreeMap<CoinShare, crate::ledger::CoinUtxo>,
     created: BTreeSet<CoinShare>,
     asset: Option<AssetJournal>,
@@ -296,27 +295,27 @@ impl Engine<'_> {
     }
     fn merge_asset(&mut self, journal: AssetJournal) -> Result<(), ExecutionError> {
         for (share, previous) in journal.share_changes() {
-            if let Some(value) = previous {
-                if self.accounts_ready.contains(&value.owner.program()) {
-                    let id = value.owner.program();
-                    let account = self.assets.entry((id, value.asset)).or_default();
-                    account.0 = account
-                        .0
-                        .checked_sub(value.amount.as_units())
-                        .ok_or(ExecutionError::SettlementFailed)?;
-                    account.1.remove(&(Reverse(value.amount.as_units()), share));
-                }
+            if let Some(value) = previous
+                && self.accounts_ready.contains(&value.owner.program())
+            {
+                let id = value.owner.program();
+                let account = self.assets.entry((id, value.asset)).or_default();
+                account.0 = account
+                    .0
+                    .checked_sub(value.amount.as_units())
+                    .ok_or(ExecutionError::SettlementFailed)?;
+                account.1.remove(&(Reverse(value.amount.as_units()), share));
             }
-            if let Some(value) = self.state.extensions.assets.shares().get(&share) {
-                if self.accounts_ready.contains(&value.owner.program()) {
-                    let id = value.owner.program();
-                    let account = self.assets.entry((id, value.asset)).or_default();
-                    account.0 = account
-                        .0
-                        .checked_add(value.amount.as_units())
-                        .ok_or(ExecutionError::ArithmeticOverflow)?;
-                    account.1.insert((Reverse(value.amount.as_units()), share));
-                }
+            if let Some(value) = self.state.extensions.assets.shares().get(&share)
+                && self.accounts_ready.contains(&value.owner.program())
+            {
+                let id = value.owner.program();
+                let account = self.assets.entry((id, value.asset)).or_default();
+                account.0 = account
+                    .0
+                    .checked_add(value.amount.as_units())
+                    .ok_or(ExecutionError::ArithmeticOverflow)?;
+                account.1.insert((Reverse(value.amount.as_units()), share));
             }
         }
         self.asset = Some(match self.asset.take() {

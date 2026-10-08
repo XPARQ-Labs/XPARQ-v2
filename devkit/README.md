@@ -110,7 +110,7 @@ For advanced workflows, invoke `devkit/target/debug/wallet` directly.
 
 ProgramId is a 32-byte account/deployed-program identity. Monetary route 0 and VM
 route 2 are dispatcher numbers, not owner IDs. Coin and asset Share IDs are also
-32 bytes. Current compatibility is chain-spec 8, database schema 16, snapshot 3
+32 bytes. Current compatibility is chain-spec 9, database schema 17, snapshot 3
 and wallet file 2. Fresh compatible storage is required after a chain reset.
 
 ## Verification

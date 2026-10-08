@@ -137,6 +137,9 @@ mod tests {
                 1 => "44af36b8b03e8101b2b9f91a20461d7addb05f40401209ee2ebd50c29812bada",
                 2 => "18e5bebdda03b18f0f26373cd06f8d6b87079849988332979eeb30a9ee82ace5",
                 3 => "63c8ed79e031d7dec6f07768e925dd794ea0207cc58770cb57071825ed40eb3f",
+                5 => "881f0b33a30bef1b30e64507eda36644282449b1fed35a25a0e3ac45a281e156",
+                6 => "fab5d8933657699b4c591e69419a6e7b302b7b901cbdc3e8e911565438412886",
+                7 => "d0b2cf6ebafe8b4e8a91cbf51bf4fef1a08325501eeb510870648f91d1882794",
                 _ => unreachable!(),
             };
             assert_eq!(a.to_string(), expected);
@@ -176,6 +179,9 @@ mod tests {
                 1 => "fc6646f88ebf852c4e1c393e5101e6ae1a5e476e57241bf8c2abac1819bbde60",
                 2 => "d04d5404b7d15cdad674789d7998d70e540d1023c79c671cda21b89d0e9a4d9a",
                 3 => "56094227bae261c7a5c7cd0ac06638d83d0abcdd246fa2cf71c20c68a2e40616",
+                5 => "5c294f0aff3737f4eedcf5cc8d765aa35ba8752333fa7944e3ea833fe2db9dd2",
+                6 => "ced768db6f50e983aec9a0bf946c24562b113bc538f5004de518eb97b1ad8825",
+                7 => "6f66d28b36bb8db24320efac6053241ad87e22ec43a789d8856bcd113b2dedb3",
                 _ => unreachable!(),
             };
             assert_eq!(id.to_string(), expected);

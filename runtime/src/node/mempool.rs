@@ -1,6 +1,7 @@
 use super::*;
 use super::{config::*, gossip::*, state::*};
 use kernel::operation::{AuthorizedDeployProgram, BlockOperation};
+use std::collections::BTreeMap;
 
 #[derive(Clone)]
 struct PendingEntry {
@@ -42,9 +43,43 @@ struct PendingPool {
     entries: Vec<Arc<PendingEntry>>,
     ids: BTreeSet<[u8; 32]>,
     total_bytes: u64,
+    fingerprint: [u8; 32],
+    validated: Option<ValidatedPendingState>,
+}
+type PendingAnchor = (Option<kernel::crypto::BlockHash>, kernel::crypto::StateRoot);
+#[derive(Clone)]
+struct ValidatedPendingState {
+    anchor: PendingAnchor,
+    state: kernel::ledger::LedgerState,
+}
+type RejectionKey = (PendingAnchor, [u8; 32], [u8; 32]);
+#[derive(Default)]
+struct Rejections {
+    errors: BTreeMap<RejectionKey, String>,
+    order: std::collections::VecDeque<RejectionKey>,
+}
+impl Rejections {
+    fn insert(&mut self, key: RejectionKey, error: String) {
+        const CAPACITY: usize = 256;
+        if self.errors.contains_key(&key) {
+            return;
+        }
+        if self.order.len() == CAPACITY {
+            self.errors.remove(&self.order.pop_front().unwrap());
+        }
+        self.order.push_back(key);
+        self.errors.insert(key, error);
+    }
+}
+static REJECTIONS: OnceLock<Mutex<Rejections>> = OnceLock::new();
+fn rejections() -> &'static Mutex<Rejections> {
+    REJECTIONS.get_or_init(|| Mutex::new(Rejections::default()))
 }
 impl PendingPool {
     fn push(&mut self, entry: Arc<PendingEntry>) -> Result<(), String> {
+        if self.ids.contains(&entry.id) {
+            return Err("duplicate pending operation".into());
+        }
         let total = self
             .total_bytes
             .checked_add(entry.bytes.len() as u64)
@@ -54,6 +89,11 @@ impl PendingPool {
         }
         self.total_bytes = total;
         self.ids.insert(entry.id);
+        let mut fingerprint_input = [0; 64];
+        fingerprint_input[..32].copy_from_slice(&self.fingerprint);
+        fingerprint_input[32..].copy_from_slice(&entry.id);
+        self.fingerprint = kernel::crypto::hash_bytes(&fingerprint_input).into_bytes();
+        self.validated = None;
         self.entries.push(entry);
         Ok(())
     }
@@ -114,6 +154,9 @@ fn load_pending_pool(path: &Path) -> Result<Arc<PendingPool>, String> {
 }
 
 pub(super) fn submit_deploy(path: Option<&str>, encoded: &str) -> Result<(), String> {
+    if encoded.is_empty() || encoded.len() > 2 * kernel::block::MAX_OPERATION_SIZE {
+        return Err("deploy size is outside allowed range".into());
+    }
     let database = database_path(path);
     let bytes = hex::decode(encoded).map_err(|error| format!("invalid deploy hex: {error}"))?;
     let deploy: AuthorizedDeployProgram =
@@ -132,14 +175,16 @@ pub(super) fn insert_pending_operation(
     operation: BlockOperation,
     duplicate_is_ok: bool,
 ) -> Result<[u8; 32], String> {
+    static ADMISSION: super::admission::AdmissionGate = super::admission::AdmissionGate::new(2);
+    let _permit = ADMISSION.enter()?;
+    operation
+        .validate_structure()
+        .map_err(|error| format!("invalid operation: {error:?}"))?;
     let entry = Arc::new(PendingEntry::new(operation)?);
     if entry.bytes.len() > kernel::block::MAX_OPERATION_SIZE {
         return Err("operation exceeds block size limit".into());
     }
-    entry
-        .operation
-        .validate_structure()
-        .map_err(|error| format!("invalid operation: {error:?}"))?;
+    validate_relay_entry(&entry)?;
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
@@ -153,9 +198,29 @@ pub(super) fn insert_pending_operation(
             Err("operation is already in mempool".into())
         };
     }
-    let mut pending = current.as_ref().clone();
-    pending.push(entry)?;
-    validate_pending_pool(&ledger, &pending)?;
+    let anchor = (
+        ledger.tip_hash(),
+        ledger.state_root().map_err(|error| error.to_string())?,
+    );
+    let rejection_key = (anchor, current.fingerprint, id);
+    if let Some(error) = rejections()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .errors
+        .get(&rejection_key)
+    {
+        return Err(error.clone());
+    }
+    let pending = match extend_pending_pool(&ledger, &current, entry, anchor) {
+        Ok(pending) => pending,
+        Err(error) => {
+            rejections()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(rejection_key, error.clone());
+            return Err(error);
+        }
+    };
     let slices: Vec<&[u8]> = pending
         .entries
         .iter()
@@ -166,6 +231,29 @@ pub(super) fn insert_pending_operation(
     publish_pending(database, Arc::new(pending));
     notify_gossip();
     Ok(id)
+}
+
+fn extend_pending_pool(
+    ledger: &Ledger,
+    current: &PendingPool,
+    entry: Arc<PendingEntry>,
+    anchor: PendingAnchor,
+) -> Result<PendingPool, String> {
+    let mut pending = current.clone();
+    // Check pool limits before any cryptographic work; push invalidates only
+    // the new private copy, leaving the accepted prefix/cache untouched.
+    pending.push(Arc::clone(&entry))?;
+    let mut state =
+        if let Some(validated) = current.validated.as_ref().filter(|v| v.anchor == anchor) {
+            validated.state.clone()
+        } else {
+            replay_pending_pool(ledger, current)?
+        };
+    let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
+    let height = Height(ledger.tip_height().map_or(0, |h| h.0.saturating_add(1)));
+    apply_pending_operation(&mut state, &entry.operation, chain, height)?;
+    pending.validated = Some(ValidatedPendingState { anchor, state });
+    Ok(pending)
 }
 
 fn apply_pending_operation(
@@ -248,28 +336,40 @@ pub(super) fn validate_pending_operations(
 }
 
 fn validate_pending_pool(ledger: &Ledger, pending: &PendingPool) -> Result<(), String> {
+    replay_pending_pool(ledger, pending).map(|_| ())
+}
+
+fn validate_relay_entry(entry: &PendingEntry) -> Result<(), String> {
+    if entry.bytes.len() > kernel::block::MAX_OPERATION_SIZE {
+        return Err("operation cannot fit in a block".into());
+    }
+    let fee = match &entry.operation {
+        BlockOperation::ProgramCall(call) => call.payment.charges.miner_fee.as_zeno(),
+        BlockOperation::DeployProgram(deploy) => deploy.payment.charges.miner_fee.as_zeno(),
+    };
+    if matches!(entry.operation, BlockOperation::ProgramCall(_))
+        && entry.relay_size > MAX_STORED_TRANSACTION_SIZE
+    {
+        return Err("program call exceeds transaction size limit".into());
+    }
+    if fee < minimum_relay_fee(entry.relay_size)? {
+        return Err("operation relay fee is too low".into());
+    }
+    Ok(())
+}
+
+fn replay_pending_pool(
+    ledger: &Ledger,
+    pending: &PendingPool,
+) -> Result<kernel::ledger::LedgerState, String> {
     let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
     let height = Height(ledger.tip_height().map_or(0, |h| h.0.saturating_add(1)));
     let mut state = ledger.state().clone();
     for entry in &pending.entries {
-        if entry.bytes.len() > kernel::block::MAX_OPERATION_SIZE {
-            return Err("operation cannot fit in a block".into());
-        }
-        let fee = match &entry.operation {
-            BlockOperation::ProgramCall(call) => call.payment.charges.miner_fee.as_zeno(),
-            BlockOperation::DeployProgram(deploy) => deploy.payment.charges.miner_fee.as_zeno(),
-        };
-        if matches!(entry.operation, BlockOperation::ProgramCall(_))
-            && entry.relay_size > MAX_STORED_TRANSACTION_SIZE
-        {
-            return Err("program call exceeds transaction size limit".into());
-        }
-        if fee < minimum_relay_fee(entry.relay_size)? {
-            return Err("operation relay fee is too low".into());
-        }
+        validate_relay_entry(entry)?;
         apply_pending_operation(&mut state, &entry.operation, chain, height)?;
     }
-    Ok(())
+    Ok(state)
 }
 
 pub(super) fn read_pending_operations(path: &Path) -> Result<Vec<BlockOperation>, String> {
@@ -352,6 +452,9 @@ pub(super) fn reconcile_pending_operations(
 }
 
 pub(super) fn submit_transaction(path: Option<&str>, encoded: &str) -> Result<(), String> {
+    if encoded.is_empty() || encoded.len() > 2 * MAX_STORED_TRANSACTION_SIZE {
+        return Err("transaction size is outside allowed range".into());
+    }
     let database = database_path(path);
     let bytes =
         hex::decode(encoded).map_err(|error| format!("invalid transaction hex: {error}"))?;
@@ -561,6 +664,294 @@ pub(super) fn persist_chain_and_pending_from_store_with_snapshot(
 #[cfg(test)]
 mod serialization_benchmarks {
     use super::*;
+
+    #[test]
+    #[ignore = "manual CPU comparison; run release with --nocapture --test-threads=1"]
+    fn benchmark_pending_prefix_validation() {
+        use std::{hint::black_box, time::Instant};
+        let (ledger, key, input, amount) = funded_cache_fixture();
+        let anchor = (ledger.tip_hash(), ledger.state_root().unwrap());
+        let owner = kernel::crypto::program_id_from_public_key(&key.public_key()).unwrap();
+        let mut prefix = PendingPool::default();
+        let mut share = input;
+        let mut value = amount;
+        println!("prefix,full_replay_ms,cached_advance_ms");
+        for length in 0..=128 {
+            let entry = funded_call(&key, share, value);
+            let next = extend_pending_pool(&ledger, &prefix, Arc::clone(&entry), anchor).unwrap();
+            if [0, 16, 64, 128].contains(&length) {
+                let mut full = Vec::new();
+                let mut cached = Vec::new();
+                for sample in 0..=5 {
+                    let start = Instant::now();
+                    let replayed =
+                        replay_pending_pool(black_box(&ledger), black_box(&next)).unwrap();
+                    let replay_ms = start.elapsed().as_secs_f64() * 1000.;
+                    let start = Instant::now();
+                    let advanced = extend_pending_pool(
+                        black_box(&ledger),
+                        black_box(&prefix),
+                        Arc::clone(black_box(&entry)),
+                        anchor,
+                    )
+                    .unwrap();
+                    let advance_ms = start.elapsed().as_secs_f64() * 1000.;
+                    assert_eq!(replayed, advanced.validated.as_ref().unwrap().state);
+                    if sample != 0 {
+                        full.push(replay_ms);
+                        cached.push(advance_ms);
+                    }
+                }
+                full.sort_by(f64::total_cmp);
+                cached.sort_by(f64::total_cmp);
+                println!("{length},{:.6},{:.6}", full[2], cached[2]);
+            }
+            prefix = next;
+            let (id, coin) = prefix
+                .validated
+                .as_ref()
+                .unwrap()
+                .state
+                .utxos
+                .coins_by_owner(kernel::common::Owner::Program(owner))
+                .next()
+                .unwrap();
+            share = id;
+            value = coin.amount.as_zeno();
+        }
+    }
+
+    fn mine_cache_emission(ledger: &Ledger, miner: ProgramId) -> Block {
+        let mut block =
+            super::super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
+        let mut memory = new_pow_memory();
+        assert!(
+            crate::miner::mine_range(
+                &mut block,
+                crate::miner::MiningRange {
+                    start_nonce: 0,
+                    attempts: 1000
+                },
+                &mut memory
+            )
+            .unwrap()
+            .is_some()
+        );
+        block
+    }
+
+    fn funded_cache_fixture() -> (
+        Ledger,
+        kernel::crypto::SigningSeed,
+        kernel::monetary::coin::CoinShare,
+        u64,
+    ) {
+        let key = kernel::crypto::SigningSeed::new(
+            kernel::crypto::AccountSignatureScheme::MlDsa44,
+            Box::new([0x63; 32]),
+        );
+        let owner = kernel::crypto::program_id_from_public_key(&key.public_key()).unwrap();
+        let mut ledger = kernel::genesis::genesis_ledger()
+            .unwrap()
+            .with_applications(extension::SystemApplications);
+        let block = mine_cache_emission(&ledger, owner);
+        kernel::consensus::apply_block(&mut ledger, block).unwrap();
+        let (share, coin) = ledger
+            .state
+            .utxos
+            .coins_by_owner(kernel::common::Owner::Program(owner))
+            .next()
+            .unwrap();
+        let amount = coin.amount.as_zeno();
+        (ledger, key, share, amount)
+    }
+
+    fn funded_call(
+        key: &kernel::crypto::SigningSeed,
+        input: kernel::monetary::coin::CoinShare,
+        amount: u64,
+    ) -> Arc<PendingEntry> {
+        use kernel::program::{
+            AccountAuthorization, AuthorizedProgramInvocation, CoinCharges, CoinTransition,
+        };
+        let public_key = key.public_key();
+        let signer = kernel::crypto::program_id_from_public_key(&public_key).unwrap();
+        let mut tx = AuthorizedProgramInvocation {
+            signer,
+            call: kernel::program::system::coin_program::transfer_call(),
+            payment: CoinTransition::coin_with_charges(
+                signer,
+                vec![input],
+                vec![CoinOutput::new(signer, Zeno::ONE)],
+                CoinCharges::new(Zeno::from_zeno(1_000_000)),
+            )
+            .unwrap(),
+            authorization: AccountAuthorization {
+                salt: [0; 32],
+                public_key,
+                signature: kernel::crypto::AccountSignature {
+                    account: key.scheme(),
+                    bytes: vec![0; key.scheme().signature_size()],
+                },
+            },
+        };
+        let size = kernel::crypto::canonical_length(
+            &kernel::operation::BlockOperationRef::ProgramCall(&tx),
+        )
+        .unwrap();
+        let burn = kernel::consensus::ProtocolBurn::for_program_call(
+            kernel::consensus::StateTransitionWeight {
+                created_coin_utxos: 2,
+                consumed_coin_utxos: 1,
+                created_state_weight: 0,
+            },
+            size,
+        )
+        .unwrap()
+        .total()
+        .unwrap()
+        .as_zeno();
+        tx.payment = CoinTransition::coin_with_charges(
+            signer,
+            vec![input],
+            vec![CoinOutput::new(
+                signer,
+                Zeno::from_zeno(amount - 1_000_000 - burn),
+            )],
+            CoinCharges::new(Zeno::from_zeno(1_000_000)),
+        )
+        .unwrap();
+        let commitment = kernel::program::program_invocation_commitment(
+            signer,
+            &tx.call,
+            &tx.payment,
+            kernel::genesis::chain_context().unwrap(),
+        )
+        .unwrap();
+        tx.authorization.signature = key.sign(commitment.as_bytes());
+        Arc::new(PendingEntry::new(BlockOperation::ProgramCall(Box::new(tx))).unwrap())
+    }
+
+    #[test]
+    fn staged_prefix_accepts_children_rejects_double_spends_and_invalidates_on_state_change() {
+        let (mut ledger, key, input, amount) = funded_cache_fixture();
+        let anchor = (ledger.tip_hash(), ledger.state_root().unwrap());
+        let first = funded_call(&key, input, amount);
+        let initial = extend_pending_pool(&ledger, &PendingPool::default(), first, anchor).unwrap();
+        let before = initial.validated.as_ref().unwrap().state.clone();
+        let owner = kernel::crypto::program_id_from_public_key(&key.public_key()).unwrap();
+        let (child_input, child_coin) = before
+            .utxos
+            .coins_by_owner(kernel::common::Owner::Program(owner))
+            .next()
+            .unwrap();
+        let child = funded_call(&key, child_input, child_coin.amount.as_zeno());
+        let next = extend_pending_pool(&ledger, &initial, Arc::clone(&child), anchor).unwrap();
+        assert_eq!(
+            next.validated.as_ref().unwrap().state,
+            replay_pending_pool(&ledger, &next).unwrap()
+        );
+        // A conflicting spend and a forged child cannot mutate the accepted prefix.
+        let mut conflict = funded_call(&key, input, amount).operation.clone();
+        let BlockOperation::ProgramCall(tx) = &mut conflict else {
+            unreachable!()
+        };
+        tx.payment.charges.miner_fee = tx.payment.charges.miner_fee.checked_add(Zeno::ONE).unwrap();
+        tx.payment.outputs[0].amount = tx.payment.outputs[0].amount.checked_sub(Zeno::ONE).unwrap();
+        let commitment = kernel::program::program_invocation_commitment(
+            tx.signer,
+            &tx.call,
+            &tx.payment,
+            kernel::genesis::chain_context().unwrap(),
+        )
+        .unwrap();
+        tx.authorization.signature = key.sign(commitment.as_bytes());
+        assert!(
+            extend_pending_pool(
+                &ledger,
+                &initial,
+                Arc::new(PendingEntry::new(conflict).unwrap()),
+                anchor
+            )
+            .err()
+            .unwrap()
+            .contains("input UTXO was not found")
+        );
+        let mut forged = child.operation.clone();
+        let BlockOperation::ProgramCall(tx) = &mut forged else {
+            unreachable!()
+        };
+        tx.authorization.signature.bytes[0] ^= 1;
+        assert!(
+            extend_pending_pool(
+                &ledger,
+                &initial,
+                Arc::new(PendingEntry::new(forged).unwrap()),
+                anchor
+            )
+            .is_err()
+        );
+        assert_eq!(initial.validated.as_ref().unwrap().state, before);
+        // Same tip with changed canonical state must not reuse the old prefix state.
+        let previous_chain = ledger.chain.clone();
+        let block = mine_cache_emission(&ledger, owner);
+        let extra = kernel::monetary::coin::CoinShare::from_emission(
+            kernel::consensus::emission_origin(&block)
+                .unwrap()
+                .as_bytes(),
+        );
+        kernel::consensus::apply_block(&mut ledger, block).unwrap();
+        ledger.chain = previous_chain; // Deliberately keep the tip key fixed to exercise the state-root key.
+        let changed_anchor = (ledger.tip_hash(), ledger.state_root().unwrap());
+        assert_ne!(anchor, changed_anchor);
+        let rebuilt = extend_pending_pool(&ledger, &initial, child, changed_anchor).unwrap();
+        assert!(
+            rebuilt
+                .validated
+                .as_ref()
+                .unwrap()
+                .state
+                .utxos
+                .coin(&extra)
+                .is_some()
+        );
+        assert_eq!(
+            rebuilt.validated.as_ref().unwrap().state,
+            replay_pending_pool(&ledger, &rebuilt).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejection_cache_is_bounded_and_keys_include_state_prefix_and_tip() {
+        let mut cache = Rejections::default();
+        let anchor = (
+            Some(kernel::crypto::BlockHash([1; 32])),
+            kernel::crypto::StateRoot([2; 32]),
+        );
+        for i in 0..300u32 {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&i.to_le_bytes());
+            cache.insert((anchor, [3; 32], id), "invalid".into());
+        }
+        assert_eq!(cache.errors.len(), 256);
+        assert_eq!(cache.order.len(), 256);
+        assert!(!cache.errors.contains_key(&(anchor, [3; 32], [0; 32])));
+        let key = *cache.order.back().unwrap();
+        assert!(cache.errors.contains_key(&key));
+        assert!(!cache.errors.contains_key(&(anchor, [4; 32], key.2)));
+        assert!(!cache.errors.contains_key(&(
+            (anchor.0, kernel::crypto::StateRoot([4; 32])),
+            key.1,
+            key.2
+        )));
+        assert!(!cache.errors.contains_key(&(
+            (Some(kernel::crypto::BlockHash([4; 32])), anchor.1),
+            key.1,
+            key.2
+        )));
+        cache.insert(key, "same invalid".into());
+        assert_eq!(cache.order.len(), 256);
+    }
 
     fn cache_test_database(label: &str) -> std::path::PathBuf {
         let tick = std::time::SystemTime::now()

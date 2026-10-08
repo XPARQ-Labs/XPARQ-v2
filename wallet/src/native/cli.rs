@@ -22,8 +22,9 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         match prompt("Select")?.as_str() {
             "1" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
-                let words = prompt_default("Mnemonic words (12 or 24)", "12")?;
                 let account = prompt_signature_account()?;
+                let default_words = "24";
+                let words = prompt_default("Mnemonic words (12 or 24)", default_words)?;
                 let mut args = vec!["--wallet".into(), path, "--words".into(), words];
                 args.extend(["--account".into(), account]);
                 create_wallet(&args)?;
@@ -140,9 +141,12 @@ fn interactive_asset_wallet_rpc() -> Result<Vec<String>, String> {
 
 fn prompt_signature_account() -> Result<String, String> {
     loop {
-        let value = prompt_default("Signature account (mldsa44, mldsa65, mldsa87)", "mldsa44")?;
-        if value.parse::<Signature>().is_ok() {
-            return Ok(value);
+        let value = prompt_default(
+            "Signature account (mldsa44, mldsa65, mldsa87, slhdsa-shake128s, slhdsa-shake192s, slhdsa-shake256s)",
+            "mldsa44",
+        )?;
+        if let Ok(scheme) = value.parse::<Signature>() {
+            return Ok(scheme.as_str().to_string());
         }
         println!("Unknown signature account `{value}`");
     }
@@ -268,12 +272,12 @@ fn prompt_default(label: &str, default: &str) -> Result<String, String> {
 
 pub(super) fn create_wallet(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
+    let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
     let words = option(args, "--words")
-        .unwrap_or("12")
+        .unwrap_or("24")
         .parse::<usize>()
         .map_err(|_| "--words must be 12 or 24".to_string())?;
     let mnemonic = generate_bip39_mnemonic(words)?;
-    let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
     let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, account)?;
     wallet.mnemonic = Some(mnemonic.to_string());
     if let Some(value) = option(args, "--salt") {
@@ -316,7 +320,7 @@ fn signature_account_option(args: &[String]) -> Result<Option<Signature>, String
         .map(|value| {
             value
                 .parse::<Signature>()
-                .map_err(|_| "invalid --account; use mldsa44, mldsa65, or mldsa87".to_string())
+                .map_err(|_| "invalid --account; use mldsa44, mldsa65, mldsa87, slhdsa-shake128s, slhdsa-shake192s, or slhdsa-shake256s".to_string())
         })
         .transpose()
 }

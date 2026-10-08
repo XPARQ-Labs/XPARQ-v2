@@ -26,7 +26,7 @@ before registry insertion. These controls must remain covered when paths change.
 | 1. Bind transitions to expected state | Implemented | Tampered prestate/journal or wrong parent root must fail without canonical mutation. |
 | 2. Failure atomicity | Implemented; focused coverage exists | Failed payment, application effect, block or rollback must leave complete canonical state unchanged. Continue reviewing persistence/reorg failure boundaries. |
 | 3. Bound consensus/decoding work | Implemented limits; ongoing resource review | Oversized prefixes/payloads must fail before unbounded allocation or expensive validation. Measure RPC, P2P and replay paths rather than assuming byte caps bound CPU. |
-| 4. Deterministic vectors | Current fixtures reconciled and tests passed | Preserve chain-spec 8 vectors and state bytes/roots/accounting through replay and rollback when rules change. |
+| 4. Deterministic vectors | Current fixtures reconciled and tests passed | Preserve chain-spec 9 vectors and state bytes/roots/accounting through replay and rollback when rules change. |
 | 5. Audit protections | Pending comprehensive audit | Record findings and focused regressions for arithmetic, canonical encoding, authorization, startup and reorg behavior. |
 
 ## Current consensus limits
@@ -54,7 +54,7 @@ measurements or a review of validation order.
 
 Keep permanent vectors for authorization, canonical operation/block bytes,
 coin and asset supply, program state, roots, replay and rollback. Three existing
-chain-spec fixture assertions are reconciled for version 8 and passed on
+chain-spec fixture assertions are reconciled for version 9 and passed on
 8 October 2026, including execution, replay and rollback. Keep this gate passing
 for every intentional consensus change.
 

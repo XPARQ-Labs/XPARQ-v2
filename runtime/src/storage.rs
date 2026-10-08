@@ -17,7 +17,7 @@ const DATABASE_FILE: &str = "xparq.redb";
 
 // Reset-chain schema stores coin-only UTXOs and Program extension state/journals.
 // Tagged CoinOutput recipients require a fresh database; old bytes are incompatible.
-const SCHEMA_VERSION: u32 = 16;
+const SCHEMA_VERSION: u32 = 17;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");

@@ -67,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 8;
+pub const CHAIN_SPEC_VERSION: u32 = 9;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -118,6 +118,8 @@ struct ChainSpecIdentity<'a> {
     extension_asset_program: &'a str,
     transaction_format: &'a str,
     ownership_model: &'a str,
+    account_signature_schemes: [u8; 6],
+    slh_signature_profile: &'a str,
     monetary_call_format: &'a str,
     application_state_format: &'a str,
     vm_bytecode_format: &'a str,
@@ -190,6 +192,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         native_coin_contract: CoinContract::derive().into_bytes(),
         extension_asset_program: "xparq-unified-monetary-program-v1",
         transaction_format: "program-id-salted-signature-proof-payment-and-monetary-v3",
+        account_signature_schemes: crypto::AccountSignatureScheme::ALL.map(|s| s.id()),
+        slh_signature_profile: "fips205-pure-shake-s-empty-context-deterministic-wallet-seed32-shake256-XPARQ_SLH_DSA_KEYGEN_V1-scheme-seed",
         ownership_model: "program-only-tag0-signature-policy-v2-scheme-key-salt32-v3",
         monetary_call_format: "route0-transfer1-create2-mint3-burn4-currency0coin1asset-denycoinburn-legacyassetroute1",
         application_state_format: "program-owned-coin-asset-share32-and-versioned-program-kv-state-v5",
@@ -234,12 +238,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 8);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 9);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                44, 186, 1, 169, 74, 205, 250, 30, 135, 3, 165, 27, 206, 47, 193, 73, 208, 132, 94,
-                170, 210, 206, 135, 31, 71, 231, 51, 170, 49, 100, 190, 66
+                93, 208, 231, 34, 148, 154, 71, 111, 248, 213, 66, 61, 33, 159, 68, 90, 246, 53,
+                102, 67, 32, 1, 247, 144, 93, 201, 6, 181, 57, 182, 226, 156
             ]
         );
     }

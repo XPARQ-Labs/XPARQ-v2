@@ -77,14 +77,18 @@ the unified monetary dispatcher route, not an ownership ProgramId; monetary
 opcode 1 selects transfer. Account IDs bind policy/scheme/key/salt; deployed IDs
 bind deployer/nonce/code hash. An asset contract ID identifies the asset record.
 
-The current chain-spec is 8, database schema is 16, snapshot format is 3 and
+The current chain-spec is 9, database schema is 17, snapshot format is 3 and
 wallet file format is 2. Old chain databases are rejected; no migration is
 provided. See [ProgramCall compatibility](PROGRAM_CALL.md#storage-and-compatibility).
 
 Application extensibility is bounded by the existing XPVM instructions and hosts.
 The VM hashes bytes with XPARQ Raw-domain SHA3-256, while root transaction
-signature authorization supports ML-DSA44/65/87. Alternative signature or ZK
+signature authorization supports ML-DSA44/65/87 and Pure SLH-DSA SHAKE128s/192s/256s. Other signature or ZK
 verifiers are not currently supplied. Other source languages need a compiler
 that targets supported XPVM bytecode; arbitrary native, WASM, EVM or Cairo
 binaries are not accepted. Adding native primitives or changing consensus
 semantics requires updating nodes; deploying new supported bytecode does not.
+
+Protocol SHA3-256, ML-DSA SHAKE and SLH-DSA SHAKE share the vendored Keccak
+implementation. SLH uses the same `shake` crate as ML-DSA. Its optional SHA2/HMAC
+backend is gated by `crypto/slh-sha2-benchmark` and adds no account scheme.

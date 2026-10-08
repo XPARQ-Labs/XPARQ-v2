@@ -12,7 +12,7 @@ use crate::{
 use crypto::{HASH_SIZE, Hash, HashDomain, PROGRAM_ID_SIZE, ProgramId, canonical_bytes, domain};
 
 pub const WBDA_WINDOW: usize = 2_500;
-pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
+pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 800_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 1_200_000;
 pub const WBDA_HARDER_PERCENT: u32 = 80;

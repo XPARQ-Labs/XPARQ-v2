@@ -282,9 +282,7 @@ impl LedgerState {
 }
 
 /// Private adapter: only Program execution requests coin mutations. Consensus
-
 /// has already checked signatures, ownership, charges and input uniqueness.
-
 struct KernelCoinHost<'a, F> {
     allowed_inputs: &'a std::collections::BTreeSet<CoinShare>,
     outputs: &'a [(Owner, u64)],
@@ -487,7 +485,6 @@ impl LedgerState {
 
 impl LedgerState {
     /// Atomic execution of an authenticated program call.
-
     pub fn apply_deploy(
         &mut self,
         signed: crate::operation::AuthorizedDeployProgram,
@@ -560,7 +557,6 @@ impl LedgerState {
     }
 
     /// Validation and both state transitions run on a clone, committed only on success.
-
     pub fn apply_program_call(
         &mut self,
 
@@ -699,7 +695,6 @@ impl LedgerState {
 }
 
 #[cfg(test)]
-
 mod coin_atomicity_tests {
 
     use super::*;

@@ -20,29 +20,17 @@ use crate::{common::Owner, state_map::StateMap};
 use crate::program::system::asset_program::type_::AssetCall;
 
 /// Kernel-owned asset state with immutable public inspection.
-
 ///
-
 /// Raw authorization contexts and rollback are not application capabilities.
-
 ///
-
 /// ```compile_fail
-
 /// use kernel::monetary::asset_state::ExecutionContext;
-
 /// ```
-
 ///
-
 /// ```compile_fail
-
 /// use kernel::monetary::asset_state::AssetState;
-
 /// let _rollback = AssetState::rollback;
-
 /// ```
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize)]
 
 pub struct AssetState {
@@ -337,37 +325,23 @@ impl AssetState {
         }
     }
     /// Read-only asset accounting records. Mutation is restricted to the kernel.
-
     ///
-
     /// ```compile_fail
-
     /// use kernel::monetary::asset_state::AssetState;
-
     /// let mut state = AssetState::default();
-
     /// state.records().clear();
-
     /// ```
-
     pub fn records(&self) -> &StateMap<AssetContract, AssetRecord> {
         &self.records
     }
 
     /// Read-only live shares; applications must use the bound asset host.
-
     ///
-
     /// ```compile_fail
-
     /// use kernel::monetary::asset_state::AssetState;
-
     /// let mut state = AssetState::default();
-
     /// state.shares.clear();
-
     /// ```
-
     pub fn shares(&self) -> &StateMap<Share, AssetShare> {
         &self.shares
     }
@@ -439,7 +413,6 @@ impl AssetState {
     }
 
     /// Apply a checked monetary instruction; application dispatch belongs to extension.
-
     pub(crate) fn apply(
         &mut self,
 
@@ -872,7 +845,6 @@ impl AssetState {
 }
 
 #[cfg(test)]
-
 mod tests {
 
     use super::*;

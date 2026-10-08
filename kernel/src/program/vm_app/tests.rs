@@ -423,7 +423,7 @@ fn traps_bound_execution_and_revert_after_child_effects() {
             6,
             {
                 let mut b = Vec::new();
-                bytes(&mut b, &vec![7; 129]);
+                bytes(&mut b, &[7; 129]);
                 bytes(&mut b, b"v");
                 b.push(0x31);
                 end(&mut b, 0);

@@ -185,7 +185,8 @@ mod xpq_transfer_tests {
         recipient: ProgramId,
     ) -> (LedgerState, AuthorizedProgramInvocation, ChainContext) {
         let keys = SigningSeed::new(scheme, Box::new([91; 32]));
-        let owner = program_id_from_public_key(&keys.public_key()).unwrap();
+        let public_key = keys.public_key();
+        let owner = program_id_from_public_key(&public_key).unwrap();
         let input = CoinShare::from_bytes([92; crypto::HASH_SIZE]);
         let amount = 1_000_000;
         let mut state = LedgerState::default();
@@ -227,21 +228,26 @@ mod xpq_transfer_tests {
                 CoinCharges::new(Zeno::from_zeno(fee)),
             )
             .unwrap();
-            let commitment = program_invocation_commitment(owner, &call, &payment, chain).unwrap();
-            let tx = AuthorizedProgramInvocation {
+            let mut tx = AuthorizedProgramInvocation {
                 signer: owner,
                 call: call.clone(),
                 payment,
                 authorization: AccountAuthorization {
                     salt: [0; 32],
-                    public_key: keys.public_key(),
-                    signature: keys.sign(commitment.as_bytes()),
+                    public_key: public_key.clone(),
+                    signature: crypto::AccountSignature {
+                        account: scheme,
+                        bytes: vec![0; scheme.signature_size()],
+                    },
                 },
             };
             let actual = canonical_bytes(&AuthorizedProgramEnvelope::Program(Box::new(tx.clone())))
                 .unwrap()
                 .len() as u64;
             if actual == size {
+                let commitment =
+                    program_invocation_commitment(owner, &tx.call, &tx.payment, chain).unwrap();
+                tx.authorization.signature = keys.sign(commitment.as_bytes());
                 return (state, tx, chain);
             }
             size = actual;
@@ -268,6 +274,33 @@ mod xpq_transfer_tests {
         assert_ne!(state.utxos, before.utxos);
         state.rollback_state(journal).unwrap();
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn slh_authorized_transfer_spends_and_rolls_back_end_to_end() {
+        for scheme in crypto::AccountSignatureScheme::ALL
+            .into_iter()
+            .filter(|s| s.is_slh_dsa())
+        {
+            let (mut state, tx, chain) =
+                fixture_for_scheme(scheme, ProgramId([94; crypto::PROGRAM_ID_SIZE]));
+            let before = state.clone();
+            let input = tx.payment.inputs[0];
+            let prepared = validate_consensus_call(tx, chain, 1, &state).unwrap();
+            let journal = state
+                .apply_program_call(
+                    prepared.invocation,
+                    ProgramId([95; crypto::PROGRAM_ID_SIZE]),
+                    chain,
+                    1,
+                )
+                .unwrap();
+            assert_ne!(state.utxos, before.utxos);
+            assert!(state.utxos.coin(&input).is_none());
+            assert_eq!(state.extensions, before.extensions);
+            state.rollback_state(journal).unwrap();
+            assert_eq!(state, before);
+        }
     }
 
     #[test]
@@ -310,7 +343,20 @@ mod xpq_transfer_tests {
                 fixture_for_scheme(owner_scheme, ProgramId([94; crypto::PROGRAM_ID_SIZE]));
             validate_consensus_call(tx.clone(), chain, 1, &state).unwrap();
             let before = state.clone();
-            for attacker_scheme in crypto::AccountSignatureScheme::ALL {
+            // Preserve the ML-DSA cross-scheme matrix. Each SLH owner also
+            // rejects a valid signature from a foreign key of its own scheme
+            // and a foreign ML-DSA key; each ML owner rejects an SLH proof.
+            let attacker_schemes = if owner_scheme.is_slh_dsa() {
+                vec![owner_scheme, Signature::MlDsa44]
+            } else {
+                vec![
+                    Signature::MlDsa44,
+                    Signature::MlDsa65,
+                    Signature::MlDsa87,
+                    Signature::SlhDsaShake128s,
+                ]
+            };
+            for attacker_scheme in attacker_schemes {
                 let keys = SigningSeed::new(attacker_scheme, Box::new([90; 32]));
                 let attacker = program_id_from_public_key(&keys.public_key()).unwrap();
                 assert_ne!(attacker, tx.signer);

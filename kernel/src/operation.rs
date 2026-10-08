@@ -93,6 +93,30 @@ pub enum OperationError {
     InvalidProgramCall,
 }
 
+impl BlockOperation {
+    pub fn as_program_call(&self) -> Option<&AuthorizedProgramInvocation> {
+        match self {
+            Self::ProgramCall(call) => Some(call),
+            Self::DeployProgram(_) => None,
+        }
+    }
+
+    pub fn into_program_call(self) -> Option<Box<AuthorizedProgramInvocation>> {
+        match self {
+            Self::ProgramCall(call) => Some(call),
+            Self::DeployProgram(_) => None,
+        }
+    }
+}
+
+impl From<AuthorizedProgramEnvelope> for BlockOperation {
+    fn from(transaction: AuthorizedProgramEnvelope) -> Self {
+        match transaction {
+            AuthorizedProgramEnvelope::Program(call) => Self::ProgramCall(call),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,29 +281,5 @@ mod tests {
         let operation = deploy_operation(code);
 
         assert!(operation.validate_structure().is_ok());
-    }
-}
-
-impl BlockOperation {
-    pub fn as_program_call(&self) -> Option<&AuthorizedProgramInvocation> {
-        match self {
-            Self::ProgramCall(call) => Some(call),
-            Self::DeployProgram(_) => None,
-        }
-    }
-
-    pub fn into_program_call(self) -> Option<Box<AuthorizedProgramInvocation>> {
-        match self {
-            Self::ProgramCall(call) => Some(call),
-            Self::DeployProgram(_) => None,
-        }
-    }
-}
-
-impl From<AuthorizedProgramEnvelope> for BlockOperation {
-    fn from(transaction: AuthorizedProgramEnvelope) -> Self {
-        match transaction {
-            AuthorizedProgramEnvelope::Program(call) => Self::ProgramCall(call),
-        }
     }
 }

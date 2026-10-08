@@ -35,6 +35,7 @@ use kernel::{
     program::{AuthorizedProgramEnvelope, ProgramEnvelope as Transaction},
 };
 
+mod admission;
 const NODE_ID_FILE: &str = "node-id";
 const MAX_STORED_BLOCK_SIZE: usize = kernel::block::MAX_BLOCK_SIZE + 1024;
 const MAX_STORED_TRANSACTION_SIZE: usize = kernel::program::MAX_PROGRAM_INVOCATION_SIZE;

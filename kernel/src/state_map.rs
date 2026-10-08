@@ -296,10 +296,10 @@ impl<K: Ord, V> Index<&K> for StateMap<K, V> {
 }
 impl<K: PartialEq, V: PartialEq> PartialEq for StateMap<K, V> {
     fn eq(&self, other: &Self) -> bool {
-        if let (Some(a), Some(b)) = (&self.root, &other.root) {
-            if Arc::ptr_eq(a, b) {
-                return true;
-            }
+        if let (Some(a), Some(b)) = (&self.root, &other.root)
+            && Arc::ptr_eq(a, b)
+        {
+            return true;
         }
         self.len() == other.len() && self.iter().eq(other.iter())
     }

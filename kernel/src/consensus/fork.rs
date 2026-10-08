@@ -157,7 +157,7 @@ impl ForkChoice {
         } else {
             u64::from(block.block_weight())
         };
-        let cumulative_weight = parent_weight.saturating_add(u64::from(weight));
+        let cumulative_weight = parent_weight.saturating_add(weight);
         let node = BlockNode {
             height: block.height(),
             parent,
@@ -347,7 +347,7 @@ pub fn block_work(target_bits: u32) -> Option<Work> {
     //
     let mut denominator = [0_u64; 5];
 
-    for (index, chunk) in target.as_bytes().chunks_exact(8).enumerate() {
+    for (index, chunk) in target.as_bytes().as_chunks::<8>().0.iter().enumerate() {
         let mut bytes = [0_u8; 8];
         bytes.copy_from_slice(chunk);
         denominator[index + 1] = u64::from_be_bytes(bytes);

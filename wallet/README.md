@@ -161,7 +161,7 @@ exist; Program IDs do not accept the old Base56 encoding.
 
 Wallet files use version 2 and store the active `program_id`, `account_salt`,
 `account_salts`, signature scheme, public key and recovery material. Chain-spec 8
-and database schema 16 require compatible fresh storage; no old-chain migration
+and database schema 17 require compatible fresh storage; no old-chain migration
 is included. Coin and asset share IDs are 32 bytes, displayed as 64 hexadecimal
 characters. Old wallet files require explicit mnemonic restoration using the
 original signature scheme and, for a nondefault account, its salt.
@@ -193,3 +193,7 @@ files are implementation details, not separate account backups. See
 [ownership](../docs/OWNERSHIP.md#several-accounts-from-one-key) for persistence,
 recovery and lock handling. **11. Deploy Program** instead submits custom XPVM
 bytecode on-chain, pays fees and burn, and creates a separate deployed ProgramId.
+
+Account schemes include `mldsa44`, `mldsa65`, `mldsa87`, `slhdsa-shake128s`,
+`slhdsa-shake192s`, `slhdsa-shake256s`. Wallet creation defaults to 24 mnemonic
+words for every scheme; `--words 12` remains explicit. See [signature parameters and consensus policy](../docs/SIGNATURE_SCHEMES.md).

@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [features]
+# Opt-in backend comparison; this does not register a SHA2 account scheme.
+slh-sha2-benchmark = ["slh-dsa/sha2"]
 default = ["mainnet"]
 mainnet = []
 testnet = []
@@ -28,3 +30,20 @@ argon2.workspace = true
 static_assertions.workspace = true
 fn-dsa = { workspace = true, optional = true }
 rand_core_06.workspace = true
+
+slh-dsa.workspace = true
+shake.workspace = true
+
+[[example]]
+name = "slh_compare"
+required-features = ["slh-sha2-benchmark"]
+
+[[bench]]
+name = "slh_compare"
+path = "benches/slh_compare.rs"
+harness = false
+required-features = ["slh-sha2-benchmark"]
+
+[[bench]]
+name = "signatures"
+harness = false

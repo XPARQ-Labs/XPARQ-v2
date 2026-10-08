@@ -14,3 +14,7 @@ devnet = ["kernel/devnet"]
 
 [dependencies]
 kernel.workspace = true
+
+[[bench]]
+name = "block_validation"
+harness = false

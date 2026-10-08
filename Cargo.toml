@@ -16,6 +16,8 @@ repository = "https://github.com/XPARQ-Labs/XPARQ-v2"
 debug = true
 
 [workspace.dependencies]
+slh-dsa = { version = "=0.2.0-rc.5", path = "depend/slhdsa/slh-dsa", features = ["zeroize"] }
+shake = { version = "0.1.0", path = "depend/mldsa/shake", features = ["zeroize"] }
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "depend/argon2/argon2" }
 bip39 = "2.2"
 borsh = { version = "1.5", features = ["derive", "rc"], path = "depend/traits/borsh" }
@@ -71,3 +73,16 @@ typenum = { path = "depend/utils/typenum" }
 unicode-ident = { path = "depend/proc-macro/unicode-ident" }
 version_check = { path = "depend/utils/version_check" }
 zeroize_derive = { path = "depend/traits/zeroize_derive" }
+
+# Hash-based signing is expensive without optimization, including generic code
+# instantiated in crypto. Keep debug wallet/node builds usable for SLH-DSA.
+[profile.dev.package.crypto]
+opt-level = 3
+[profile.dev.package.slh-dsa]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+[profile.dev.package.shake]
+opt-level = 3
+[profile.dev.package.keccak]
+opt-level = 3

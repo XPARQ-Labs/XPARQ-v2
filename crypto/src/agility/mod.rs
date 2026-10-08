@@ -16,6 +16,9 @@ pub enum SignatureScheme {
     MlDsa65 = 2,
     MlDsa87 = 3,
     SqisignLevel5 = 4,
+    SlhDsaShake128s = 5,
+    SlhDsaShake192s = 6,
+    SlhDsaShake256s = 7,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -137,7 +140,12 @@ pub enum SignatureContext {
 pub const fn account_signature_scheme_supported(scheme: SignatureScheme) -> bool {
     matches!(
         scheme,
-        SignatureScheme::MlDsa44 | SignatureScheme::MlDsa65 | SignatureScheme::MlDsa87
+        SignatureScheme::MlDsa44
+            | SignatureScheme::MlDsa65
+            | SignatureScheme::MlDsa87
+            | SignatureScheme::SlhDsaShake128s
+            | SignatureScheme::SlhDsaShake192s
+            | SignatureScheme::SlhDsaShake256s
     )
 }
 
@@ -248,11 +256,14 @@ mod tests {
     }
 
     #[test]
-    fn only_ml_dsa_accounts_are_supported() {
+    fn selected_account_schemes_are_supported() {
         for scheme in [
             SignatureScheme::MlDsa44,
             SignatureScheme::MlDsa65,
             SignatureScheme::MlDsa87,
+            SignatureScheme::SlhDsaShake128s,
+            SignatureScheme::SlhDsaShake192s,
+            SignatureScheme::SlhDsaShake256s,
         ] {
             assert!(account_signature_scheme_supported(scheme));
         }

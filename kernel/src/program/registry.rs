@@ -248,6 +248,17 @@ pub enum RegistryError {
     InvalidRecord,
 }
 
+impl AsRef<[u8; HASH_SIZE]> for ProgramHash {
+    fn as_ref(&self) -> &[u8; HASH_SIZE] {
+        self.as_bytes()
+    }
+}
+impl From<crypto::CodecError> for RegistryError {
+    fn from(_: crypto::CodecError) -> Self {
+        Self::Encoding
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,16 +411,5 @@ mod tests {
             registry.validate(Height(3)),
             Err(RegistryError::InvalidRecord)
         );
-    }
-}
-
-impl AsRef<[u8; HASH_SIZE]> for ProgramHash {
-    fn as_ref(&self) -> &[u8; HASH_SIZE] {
-        self.as_bytes()
-    }
-}
-impl From<crypto::CodecError> for RegistryError {
-    fn from(_: crypto::CodecError) -> Self {
-        Self::Encoding
     }
 }

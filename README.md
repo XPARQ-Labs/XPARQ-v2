@@ -461,12 +461,15 @@ A custom wallet path can be supplied:
 
 By default, wallet creation uses the `mldsa44` signature account.
 
-Available signature accounts currently include:
+Available signature accounts currently include (see [signature parameters](docs/SIGNATURE_SCHEMES.md)):
 
 ```text
 mldsa44
 mldsa65
 mldsa87
+slhdsa-shake128s
+slhdsa-shake192s
+slhdsa-shake256s
 ```
 
 Example:
@@ -793,6 +796,13 @@ use the touched entries instead of copying entire asset tables. See
 [CPU measurements and remaining costs](docs/CPU_VALIDATION.md) for the benchmark
 command and its limits.
 
+Repeatable [signature and block-validation benchmarks](benches/README.md) run
+with `cargo bench`; [measurement details](docs/BENCHMARKS.md) explain their scope.
+The [2026-10-09 hardening report](docs/HARDENING_2026-10-09.md) records secret
+buffer handling, wallet defaults, admission bounds, large-state replay and cache
+measurements. An [independent-review handoff](docs/INDEPENDENT_SECURITY_REVIEW.md)
+is prepared; external review has not been completed.
+
 [Owner indexes](docs/OWNER_INDEX.md) narrow coin and asset lookups to a program's
 own share IDs. They are rebuilt on restore and excluded from canonical storage
 and state-root encoding.
@@ -884,7 +894,7 @@ See [salted ownership and CLI](docs/OWNERSHIP.md).
 
 ### Protocol and storage compatibility
 
-The current protocol uses **chain-spec version 8** and **database schema 16**.
+The current protocol uses **chain-spec version 9** and **database schema 17**.
 Coin share and asset share identifiers use full domain-separated SHA3-256 hashes
 (32 bytes, displayed as 64 hexadecimal characters). The former 16-byte share
 encoding is rejected. A canonical coin UTXO occupies 73 bytes for state-growth

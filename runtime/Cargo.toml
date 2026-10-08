@@ -33,3 +33,7 @@ wallet = { version = "0.1.0", path = "../wallet", default-features = false }
 litep2p = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+
+[[bench]]
+name = "ledger_sync"
+harness = false

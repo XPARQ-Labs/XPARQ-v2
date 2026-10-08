@@ -368,7 +368,10 @@ impl AccountWallet {
             authorization: kernel::program::AccountAuthorization {
                 salt: self.account_salt,
                 public_key: self.public_key.clone(),
-                signature: self.signing_seed.sign(&[0; kernel::crypto::HASH_SIZE]),
+                signature: kernel::crypto::AccountSignature {
+                    account: self.account(),
+                    bytes: vec![0; self.account().signature_size()],
+                },
             },
         };
         let commitment = signed.commitment(chain).map_err(|e| e.to_string())?;
@@ -817,6 +820,52 @@ mod tests {
             account_wallet_from_file_bytes(&tampered_private)
                 .unwrap_err()
                 .contains("private key does not match")
+        );
+    }
+}
+
+#[cfg(test)]
+mod slh_wallet_tests {
+    use super::*;
+    #[test]
+    fn slh_wallet_roundtrip_and_salted_transfer_authorization() {
+        let mnemonic = encode_bip39_mnemonic(&[19; 32]).unwrap();
+        let mut wallet =
+            account_wallet_from_bip39_mnemonic(&mnemonic, Signature::SlhDsaShake128s).unwrap();
+        wallet.mnemonic = Some(mnemonic);
+        wallet.select_account([17; 32]).unwrap();
+        let bytes = account_wallet_file_bytes(&wallet).unwrap();
+        let restored = account_wallet_from_file_bytes(&bytes).unwrap();
+        assert_eq!(restored.public_key, wallet.public_key);
+        assert_eq!(restored.program_id, wallet.program_id);
+        let payment = kernel::program::CoinTransition::coin_with_charges(
+            wallet.program_id,
+            vec![kernel::monetary::coin::CoinShare::from_bytes([18; 32])],
+            vec![],
+            kernel::program::CoinCharges::new(kernel::monetary::coin::Zeno::from_zeno(1)),
+        )
+        .unwrap();
+        let mut signed = restored.sign_xpq_transfer(payment).unwrap();
+        let chain = kernel::genesis::chain_context().unwrap();
+        let commitment = kernel::program::program_invocation_commitment(
+            signed.signer,
+            &signed.call,
+            &signed.payment,
+            chain,
+        )
+        .unwrap();
+        drop(restored);
+        drop(wallet);
+        assert!(
+            signed
+                .authorization
+                .verify_commitment(signed.signer, &commitment, 0)
+        );
+        signed.authorization.salt[0] ^= 1;
+        assert!(
+            !signed
+                .authorization
+                .verify_commitment(signed.signer, &commitment, 0)
         );
     }
 }

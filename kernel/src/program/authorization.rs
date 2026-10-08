@@ -128,6 +128,12 @@ impl AuthorizedProgramInvocation {
         chain: ChainContext,
         height: u64,
     ) -> Result<bool, IntentError> {
+        if !self.authorization.active_at_height(height)
+            || !self.authorization.public_key.is_valid_encoding()
+            || !self.authorization.signature.is_valid_encoding()
+        {
+            return Ok(false);
+        }
         let commitment =
             program_invocation_commitment(self.signer, &self.call, &self.payment, chain)?;
         Ok(self

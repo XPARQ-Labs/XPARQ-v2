@@ -6,6 +6,55 @@ use std::io::Read;
 mod tests {
     use super::*;
 
+    #[test]
+    fn new_wallet_defaults_to_24_words_for_every_scheme_and_explicit_12_restores() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "xparq-wallet-words-{}-{unique}",
+            std::process::id()
+        ));
+        for account in kernel::crypto::AccountSignatureScheme::ALL {
+            let path = directory.join(format!("{}.json", account.id()));
+            let args = vec![
+                "--wallet".into(),
+                path.to_str().unwrap().into(),
+                "--account".into(),
+                account.to_string(),
+            ];
+            super::super::cli::create_wallet(&args).unwrap();
+            let loaded = super::super::wallet_file::load_wallet(path.to_str().unwrap()).unwrap();
+            assert_eq!(
+                loaded
+                    .0
+                    .mnemonic
+                    .as_ref()
+                    .unwrap()
+                    .split_whitespace()
+                    .count(),
+                24
+            );
+        }
+        let path = directory.join("explicit-12.json");
+        super::super::cli::create_wallet(&[
+            "--wallet".into(),
+            path.to_str().unwrap().into(),
+            "--words".into(),
+            "12".into(),
+        ])
+        .unwrap();
+        let loaded = super::super::wallet_file::load_wallet(path.to_str().unwrap()).unwrap();
+        let phrase = loaded.0.mnemonic.as_ref().unwrap();
+        assert_eq!(phrase.split_whitespace().count(), 12);
+        let restored =
+            wallet::account_wallet_from_bip39_mnemonic(phrase, loaded.0.public_key.scheme())
+                .unwrap();
+        assert_eq!(restored.program_id, loaded.0.program_id);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn utxo_status(utxo: &AccountUtxo) -> &'static str {
         if utxo.reserved {
             "reserved"

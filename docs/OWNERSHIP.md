@@ -11,7 +11,7 @@ ProgramId is SHA3-256 with the framed domain `XPARQ_HASH_PROGRAM_ACCOUNT`, over:
 `xparq:signature-policy:v2 || scheme_id_u8 || canonical_public_key_bytes || salt_32_bytes`.
 Public-key length is validated against the chosen scheme before hashing. Policy,
 scheme, full key and salt are bound to the instance identity. Supported schemes remain
-ML-DSA44/65/87. Public keys appear in spending proofs, not in UTXO owners.
+ML-DSA44/65/87 and Pure SLH-DSA SHAKE128s/192s/256s. Public keys appear in spending proofs, not in UTXO owners.
 
 A witness reveals its 32-byte public salt, public key and signature. The system policy derives its
 ProgramId, checks it against the transaction principal, and verifies the signature
@@ -51,7 +51,7 @@ Program IDs (optionally prefixed with `program:`); miners use `--miner PROGRAM_I
 ## Compatibility
 
 Owner remains tag 0 plus 32-byte ProgramId. Coin and asset share IDs now use
-full 32-byte SHA3-256 hashes; canonical coin UTXO weight is 73 bytes. Chain-spec 8/database schema 16 separate this protocol from older chains.
+full 32-byte SHA3-256 hashes; canonical coin UTXO weight is 73 bytes. Chain-spec 8/database schema 17 separate this protocol from older chains.
 Wallet files use version 2 and store the active `program_id`, active salt and the
 list of account salts alongside one mnemonic/key. Even the default zero-salt ID
 changes because the signature-policy domain is now v2. Old proofs and old wallet
