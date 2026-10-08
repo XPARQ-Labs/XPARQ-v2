@@ -2,8 +2,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::program::system::script::{call::ProgramCall, execute::decode_program};
 use crypto::{
-    AccountSignature, Address, HASH_SIZE, HashDomain, PublicKey, address_from_public_key,
-    canonical_bytes, domain, verify,
+    AccountSignature, HASH_SIZE, HashDomain, ProgramId, PublicKey, canonical_bytes, domain,
 };
 
 use crate::common::ChainContext;
@@ -97,25 +96,17 @@ impl AccountAuthorization {
 
     pub fn verify_commitment(
         &self,
-        sender: Address,
+        sender: ProgramId,
         commitment: &AuthorizationCommitment,
         height: u64,
     ) -> bool {
-        if !self.active_at_height(height) {
-            return false;
-        }
-
-        if address_from_public_key(&self.public_key) != Ok(sender) {
-            return false;
-        }
-
-        verify(&self.public_key, commitment.as_bytes(), &self.signature)
+        super::system::signature_policy::authorize(sender, commitment, self, height)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedProgramInvocation {
-    pub signer: Address,
+    pub signer: ProgramId,
     pub call: ProgramCall,
     pub payment: CoinTransition,
     pub authorization: AccountAuthorization,
@@ -146,7 +137,7 @@ impl AuthorizedProgramInvocation {
 
 /// One signature binds the program call and its XPQ payment to this chain.
 pub fn program_invocation_commitment(
-    signer: Address,
+    signer: ProgramId,
     call: &ProgramCall,
     payment: &CoinTransition,
     chain: ChainContext,
@@ -240,7 +231,7 @@ mod program_transaction_tests {
         },
         monetary::coin::{CoinOutput, CoinShare, Zeno},
     };
-    use crypto::{AccountSignatureScheme, SigningSeed};
+    use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
     struct EmptyState;
     impl ProgramStateView for EmptyState {
@@ -253,7 +244,7 @@ mod program_transaction_tests {
     fn malformed_in_memory_public_key_cannot_authorize_a_commitment() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([14; 32]));
         let public_key = seed.public_key();
-        let sender = address_from_public_key(&public_key).unwrap();
+        let sender = program_id_from_public_key(&public_key).unwrap();
         let commitment = AuthorizationCommitment::from_bytes([8; HASH_SIZE]);
         let mut authorization = AccountAuthorization {
             public_key,
@@ -267,7 +258,7 @@ mod program_transaction_tests {
     #[test]
     fn program_envelope_binds_payment_and_requires_state_view() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([14; 32]));
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([8; HASH_SIZE]);
         let call = ProgramCall {
             program: SystemProgramId::ASSET,
@@ -276,7 +267,7 @@ mod program_transaction_tests {
                 name: "PROGRAM".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
-                mint_authority: crate::common::Owner::Address(signer),
+                mint_authority: crate::common::Owner::Program(signer),
                 nonce: 1,
             })
             .unwrap(),
@@ -310,8 +301,8 @@ mod program_transaction_tests {
         changed_call.call.payload[4] ^= 1;
         assert!(!changed_call.verify_authorizations(chain, 0).unwrap());
         let mut changed_signer = signed.clone();
-        changed_signer.signer = Address::ZERO;
-        changed_signer.payment.signer = Address::ZERO;
+        changed_signer.signer = ProgramId::ZERO;
+        changed_signer.payment.signer = ProgramId::ZERO;
         assert!(!changed_signer.verify_authorizations(chain, 0).unwrap());
         let transaction = AuthorizedProgramEnvelope::Program(Box::new(signed.clone()));
         let encoded = borsh::to_vec(&transaction).unwrap();

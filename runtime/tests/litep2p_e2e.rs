@@ -27,11 +27,11 @@ fn litep2p_three_node_transaction_sync_reconnect_and_restart() {
     wait_for_status(&c_rpc, |status| status["tip_height"] == 2);
 
     let sender = sender_wallet();
-    let sender_address = address_to_string(&sender.address);
+    let sender_program_id = program_id_to_string(&sender.program_id);
     let recipient_keys = SigningSeed::new(Signature::MlDsa44, Box::new([43; 32]));
-    let recipient = address_from_public_key(&recipient_keys.public_key()).unwrap();
-    let recipient_address = address_to_string(&recipient);
-    let sender_account = account(&a_rpc, &sender_address).unwrap();
+    let recipient = program_id_from_public_key(&recipient_keys.public_key()).unwrap();
+    let recipient_address = program_id_to_string(&recipient);
+    let sender_account = account(&a_rpc, &sender_program_id).unwrap();
     let available = sender_account["utxos"]
         .as_array()
         .unwrap()
@@ -56,12 +56,12 @@ fn litep2p_three_node_transaction_sync_reconnect_and_restart() {
     let transaction = loop {
         let burn = state_burn.as_zeno() + archival_bytes;
         let intent = CoinTransition::coin_with_charges(
-            sender.address,
+            sender.program_id,
             vec![input_id],
             vec![
                 CoinOutput::new(recipient, sent),
                 CoinOutput::new(
-                    sender.address,
+                    sender.program_id,
                     Zeno::from_zeno(input_amount - sent.as_zeno() - burn - archival_bytes.max(1)),
                 ),
             ],
@@ -83,7 +83,7 @@ fn litep2p_three_node_transaction_sync_reconnect_and_restart() {
     assert_eq!(submitted["hash"], transaction_hash);
 
     wait_for_status(&c_rpc, |_| {
-        account(&c_rpc, &sender_address).is_ok_and(|account| {
+        account(&c_rpc, &sender_program_id).is_ok_and(|account| {
             account["utxos"]
                 .as_array()
                 .is_some_and(|utxos| utxos.iter().any(|utxo| utxo["reserved"] == true))
@@ -118,10 +118,10 @@ fn litep2p_three_node_transaction_sync_reconnect_and_restart() {
     assert_eq!(transaction_response["status"], "confirmed");
     assert_eq!(transaction_response["height"], 3);
 
-    let address_response = http_get(&c_rpc, &format!("/explorer/address/{recipient_address}"))
+    let program_response = http_get(&c_rpc, &format!("/explorer/program/{recipient_address}"))
         .expect("address explorer lookup after restart");
 
-    let activities = address_response["activities"]
+    let activities = program_response["activities"]
         .as_array()
         .expect("address activities");
 
@@ -150,7 +150,7 @@ fn litep2p_reorgs_to_verified_stronger_fork() {
     copy_tree(&common, &weaker);
     copy_tree(&common, &stronger);
     let fork_keys = SigningSeed::new(Signature::MlDsa44, Box::new([91; 32]));
-    let fork_miner = address_to_string(&address_from_public_key(&fork_keys.public_key()).unwrap());
+    let fork_miner = program_id_to_string(&program_id_from_public_key(&fork_keys.public_key()).unwrap());
     mine_to(&weaker, 1, &fork_miner);
     mine(&stronger, 2);
 
@@ -304,8 +304,8 @@ fn litep2p_fails_over_from_stalled_peer_and_reuses_its_committed_body() {
         "expected an incomplete durable prefix: {log}"
     );
     assert_eq!(
-        account(&target_rpc, &miner_address()).unwrap()["total"],
-        account(&b_rpc, &miner_address()).unwrap()["total"]
+        account(&target_rpc, &miner_program_id()).unwrap()["total"],
+        account(&b_rpc, &miner_program_id()).unwrap()["total"]
     );
     drop(target_node);
     let target_node = start_node(&target, &target_p2p, &target_rpc, &[], None);

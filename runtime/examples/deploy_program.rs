@@ -7,7 +7,7 @@ use std::{
 };
 
 use kernel::{
-    crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key, canonical_bytes},
+    crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key, canonical_bytes},
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     operation::{AuthorizedDeployProgram, BlockOperation},
     program::{AccountAuthorization, CoinCharges, CoinTransition, DeployProgram},
@@ -49,7 +49,7 @@ fn run() -> Result<(), String> {
         .try_into()
         .map_err(|_| "seed must contain exactly 32 bytes")?;
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new(seed_bytes));
-    let owner = address_from_public_key(&seed.public_key()).map_err(|error| error.to_string())?;
+    let owner = program_id_from_public_key(&seed.public_key()).map_err(|error| error.to_string())?;
     let input: CoinShare = args[3]
         .parse()
         .map_err(|e| format!("invalid coin share: {e}"))?;
@@ -125,7 +125,7 @@ fn run() -> Result<(), String> {
     fs::write(&args[7], bytes).map_err(|e| e.to_string())?;
     println!(
         "owner={} program_id={} operation_id={} burn={} miner_fee={} output={}",
-        kernel::crypto::address_to_string(&owner),
+        kernel::crypto::program_id_to_string(&owner),
         second["program_id"].as_str().unwrap_or("?"),
         hex::encode(operation.id().map_err(|e| e.to_string())?.into_bytes()),
         burn,

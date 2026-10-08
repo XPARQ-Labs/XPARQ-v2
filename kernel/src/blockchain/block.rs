@@ -7,7 +7,7 @@ use std::{
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::{
-    Address, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot, canonical_bytes,
+    ProgramId, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot, canonical_bytes,
     domain,
 };
 
@@ -172,12 +172,12 @@ impl Write for CappedCounter {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Emission {
-    pub to: Address,
+    pub to: ProgramId,
     pub subsidy: Zeno,
 }
 
 impl Emission {
-    pub const fn new(to: Address, subsidy: Zeno) -> Self {
+    pub const fn new(to: ProgramId, subsidy: Zeno) -> Self {
         Self { to, subsidy }
     }
 
@@ -316,12 +316,12 @@ impl Block {
         self.header.previous_hash
     }
 
-    pub fn miner_address(&self) -> Address {
+    pub fn miner_program_id(&self) -> ProgramId {
         self.body
             .emission
             .as_ref()
             .map(|emission| emission.to)
-            .unwrap_or(Address([0; crypto::ADDRESS_SIZE]))
+            .unwrap_or(ProgramId([0; crypto::PROGRAM_ID_SIZE]))
     }
 
     pub const fn state_root(&self) -> StateRoot {
@@ -498,7 +498,7 @@ pub fn decode_block(bytes: &[u8]) -> Result<Block, CodecError> {
 mod p3e_replay_tests {
     use super::*;
 
-    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+    use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
     use crate::{
         common::ChainContext,
@@ -512,7 +512,7 @@ mod p3e_replay_tests {
     fn duplicate_fixture() -> BlockOperation {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x51; 32]));
 
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([0x71; crypto::HASH_SIZE]);
 
         let intent = CoinTransition::coin(
@@ -543,7 +543,7 @@ mod p3e_replay_tests {
 
         assert_eq!(operation.id().unwrap(), operation.clone().id().unwrap());
 
-        let miner = Address([0x22; crypto::ADDRESS_SIZE]);
+        let miner = ProgramId([0x22; crypto::PROGRAM_ID_SIZE]);
 
         let block = Block::from_protocol_operations(
             Height(1),

@@ -3,7 +3,7 @@
 use super::*;
 
 use crypto::{
-    AccountSignatureScheme, Address, SigningSeed, address_from_public_key, canonical_bytes,
+    AccountSignatureScheme, ProgramId, SigningSeed, program_id_from_public_key, canonical_bytes,
 };
 
 use crate::{
@@ -52,7 +52,7 @@ fn commit(ledger: &mut Ledger, mut block: Block) -> Block {
 
 fn next_block(
     ledger: &Ledger,
-    miner: Address,
+    miner: ProgramId,
     transactions: Vec<AuthorizedProgramEnvelope>,
 ) -> Block {
     let height = Height(ledger.tip_height().unwrap().0 + 1);
@@ -72,7 +72,7 @@ fn signed_spend(
     seed: &SigningSeed,
     chain: crate::common::ChainContext,
 ) -> AuthorizedProgramEnvelope {
-    let signer = address_from_public_key(&seed.public_key()).unwrap();
+    let signer = program_id_from_public_key(&seed.public_key()).unwrap();
     let call = crate::program::system::coin_program::transfer_call();
     let commitment = program_invocation_commitment(signer, &call, &intent, chain).unwrap();
     AuthorizedProgramEnvelope::Program(Box::new(AuthorizedProgramInvocation {
@@ -87,7 +87,7 @@ fn signed_spend(
 }
 
 fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> Block {
-    let signer = address_from_public_key(&seed.public_key()).unwrap();
+    let signer = program_id_from_public_key(&seed.public_key()).unwrap();
     let chain = ledger.chain_context.unwrap();
     let (opcode, payload) = match &call {
         AssetCall::Register(v) => (AssetOpcode::Register, borsh::to_vec(v).unwrap()),
@@ -101,7 +101,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
         .apply(
             &call,
             ExecutionContext {
- actor: crate::common::Owner::Address(signer),
+ actor: crate::common::Owner::Program(signer),
                 commitment: [11; 32],
             },
         )
@@ -120,7 +120,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
         .state
         .utxos
         .coins()
-        .filter(|(_, v)| v.owner == crate::common::Owner::Address(signer))
+        .filter(|(_, v)| v.owner == crate::common::Owner::Program(signer))
         .max_by_key(|(_, v)| v.amount)
         .unwrap();
     let amount = coin.amount;
@@ -169,9 +169,9 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
 fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
     let mut vectors = Vec::new();
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x24; 32]));
-    let owner = address_from_public_key(&seed.public_key()).unwrap();
-    let recipient = Address([0x35; crypto::ADDRESS_SIZE]);
-    let other_miner = Address([0x46; crypto::ADDRESS_SIZE]);
+    let owner = program_id_from_public_key(&seed.public_key()).unwrap();
+    let recipient = ProgramId([0x35; crypto::PROGRAM_ID_SIZE]);
+    let other_miner = ProgramId([0x46; crypto::PROGRAM_ID_SIZE]);
     let chain = genesis::chain_context().unwrap();
     let mut ledger = genesis::genesis_ledger().unwrap();
     record(
@@ -298,7 +298,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
             name: "Phase4 Vector".into(),
             max_supply: Unit::from_units(100),
             initial_mint: Unit::from_units(10),
-            mint_authority: crate::common::Owner::Address(owner),
+            mint_authority: crate::common::Owner::Program(owner),
             nonce: 7,
         }),
     );
@@ -323,7 +323,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         AssetCall::Mint(Mint {
             asset,
             nonce: 1,
-            recipient: crate::common::Owner::Address(owner),
+            recipient: crate::common::Owner::Program(owner),
             amount: Unit::from_units(4),
         }),
     );
@@ -344,7 +344,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         AssetCall::Transfer(Transfer {
             asset,
             inputs,
-            outputs: vec![AssetOutput::new(crate::common::Owner::Address(owner), Unit::from_units(14))],
+            outputs: vec![AssetOutput::new(crate::common::Owner::Program(owner), Unit::from_units(14))],
         }),
     );
     record(&mut vectors, "program_transfer_block", &transfer);

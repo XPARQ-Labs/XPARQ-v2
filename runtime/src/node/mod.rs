@@ -27,7 +27,7 @@ use kernel::{
         expected_next_difficulty, new_pow_memory,
     },
     crypto::{
-        Address, BlockHash, PoWMemory, address_from_string, canonical_bytes, canonical_decode,
+        ProgramId, BlockHash, PoWMemory, program_id_from_string, canonical_bytes, canonical_decode,
     },
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
@@ -133,9 +133,10 @@ struct RunConfig {
     p2p_listen: String,
     rpc_listen: String,
     peers: Vec<String>,
-    miner: Option<Address>,
+    miner: Option<ProgramId>,
     public_addr: Option<PeerAddress>,
     nat_traversal: bool,
+    chain_minimums: chain_minimums::ChainMinimums,
     #[cfg(feature = "litep2p-devnet")]
     litep2p: bool,
     #[cfg(feature = "litep2p-devnet")]
@@ -188,6 +189,7 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+mod chain_minimums;
 mod chain_sync;
 mod config;
 mod explorer;
@@ -227,7 +229,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         ),
         Some("mine-block") => mining::mine_one_block(
             args.get(1).map(String::as_str),
-            args.get(2).ok_or("missing miner address")?,
+            args.get(2).ok_or("missing miner program ID")?,
         ),
         Some("submit-transaction") => mempool::submit_transaction(
             args.get(1).map(String::as_str),
@@ -238,9 +240,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             args.get(2).ok_or("missing deploy hex")?,
         ),
         Some("mempool") => mempool::print_mempool(args.get(1).map(String::as_str)),
-        Some("account") => explorer::print_account(
+        Some("program-account") => explorer::print_account(
             args.get(1).map(String::as_str),
-            args.get(2).ok_or("missing account address")?,
+            args.get(2).ok_or("missing account program ID")?,
         ),
         Some("rpc") => rpc::serve_rpc(
             args.get(1).map(String::as_str),
@@ -282,6 +284,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 fn run_automatic(args: &[String]) -> Result<(), String> {
     let config = RunConfig::parse(args)?;
     state::load_or_initialize(&config.database)?;
+    chain_minimums::configure(&config.database, config.chain_minimums)?;
+    println!(
+        "chain_minimums: work={} weight={}",
+        util::format_work(config.chain_minimums.work.to_be_limbs()),
+        config.chain_minimums.weight
+    );
     config::configure_public_address(&config)?;
     let sync_lock = Arc::new(Mutex::new(()));
 

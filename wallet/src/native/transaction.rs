@@ -18,7 +18,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let explicit_change = option(args, "--change").map(parse_amount).transpose()?;
     let change_target = option(args, "--change-to")
-        .map(|address| address_from_string(address).map_err(|error| error.to_string()))
+        .map(|program_id| program_id_from_string(program_id).map_err(|error| error.to_string()))
         .transpose()?;
     if inputs.is_empty() && (explicit_change.is_some() || change_target.is_some()) {
         return Err("automatic input selection also calculates change automatically".into());
@@ -28,10 +28,10 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
             .as_zeno()
             .checked_add(fee)
             .ok_or("transaction amount plus fee overflow")?;
-        let (selected, change, _state_burn, change_address) = if inputs.is_empty() {
+        let (selected, change, _state_burn, change_program_id) = if inputs.is_empty() {
             let (selected, _total, state_burn, change) =
                 select_account_inputs_with_state_burn(rpc, &wallet, required, 2, 0, archival_burn)?;
-            (selected, change, state_burn, wallet.address())
+            (selected, change, state_burn, wallet.program_id())
         } else {
             let gross_change = explicit_change.map_or(0, Zeno::as_zeno);
             let created = 2_u64 + u64::from(gross_change > fee);
@@ -54,15 +54,15 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
                 inputs.clone(),
                 change,
                 state_burn,
-                change_target.unwrap_or(wallet.address()),
+                change_target.unwrap_or(wallet.program_id()),
             )
         };
         let mut outputs = vec![CoinOutput::to_owner(recipient, amount)];
         if change > 0 {
-            outputs.push(CoinOutput::new(change_address, Zeno::from_zeno(change)));
+            outputs.push(CoinOutput::new(change_program_id, Zeno::from_zeno(change)));
         }
         let intent = CoinTransition::coin_with_charges(
-            wallet.address(),
+            wallet.program_id(),
             selected,
             outputs,
             CoinCharges::new(Zeno::from_zeno(fee)),
@@ -71,6 +71,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedProgramEnvelope::Program(Box::new(signed)))
     })?;
+    drop(wallet);
     submit_or_print_transaction(args, &transaction)
 }
 
@@ -122,11 +123,11 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
             .filter(|amount| *amount > 0)
             .ok_or("UTXO total is insufficient for consolidation fee and protocol burn")?;
         let outputs = vec![CoinOutput::new(
-            wallet.address(),
+            wallet.program_id(),
             Zeno::from_zeno(consolidated),
         )];
         let intent = CoinTransition::coin_with_charges(
-            wallet.address(),
+            wallet.program_id(),
             inputs.clone(),
             outputs,
             CoinCharges::new(Zeno::from_zeno(fee)),
@@ -135,12 +136,13 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
         let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedProgramEnvelope::Program(Box::new(signed)))
     })?;
+    drop(wallet);
     submit_or_print_transaction(args, &transaction)
 }
 
 fn account_input_candidates(rpc: &str, wallet: &LoadedWallet) -> Result<Vec<AccountUtxo>, String> {
-    let address = kernel::crypto::address_to_string(&wallet.address());
-    let response = fetch_account(rpc, &address)?;
+    let program_id = kernel::crypto::program_id_to_string(&wallet.program_id());
+    let response = fetch_account(rpc, &program_id)?;
     let mut candidates = response
         .utxos
         .into_iter()
@@ -233,32 +235,47 @@ pub(super) fn select_account_inputs_with_vm_state_burn(
 
 pub(super) fn reject_manual_fee(args: &[String]) -> Result<(), String> {
     if option(args, "--miner").is_some() {
-        return Err(
-            "--miner is no longer supported; wallet fee is automatic at 1 zeno/byte".into(),
-        );
+        return Err(format!(
+            "--miner is no longer supported; wallet fee is automatic at {AUTOMATIC_FEE_ZENO_PER_BYTE} zeno/byte"
+        ));
     }
     Ok(())
 }
 
 pub(super) fn automatic_fee_transaction(
-    mut build: impl FnMut(u64, u64) -> Result<AuthorizedProgramEnvelope, String>,
+    build: impl FnMut(u64, u64) -> Result<AuthorizedProgramEnvelope, String>,
 ) -> Result<AuthorizedProgramEnvelope, String> {
-    let mut fee = AUTOMATIC_FEE_ZENO_PER_BYTE;
+    automatic_fee_transaction_at_rates(
+        build,
+        AUTOMATIC_FEE_ZENO_PER_BYTE,
+        kernel::consensus::STATE_BURN_RATE_ZENO_PER_BYTE,
+    )
+}
+
+fn automatic_fee_transaction_at_rates(
+    mut build: impl FnMut(u64, u64) -> Result<AuthorizedProgramEnvelope, String>,
+    miner_fee_rate: u64,
+    archival_burn_rate: u64,
+) -> Result<AuthorizedProgramEnvelope, String> {
+    let mut fee = miner_fee_rate;
     let mut archival_burn = 0_u64;
     for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
         let transaction = build(fee, archival_burn)?;
         let size = canonical_bytes(&transaction)
             .map_err(|error| error.to_string())?
             .len();
-        let required = u64::try_from(size)
-            .ok()
-            .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ZENO_PER_BYTE))
+        let size = u64::try_from(size).map_err(|_| "transaction byte length overflow")?;
+        let required_fee = size
+            .checked_mul(miner_fee_rate)
             .ok_or("automatic transaction fee overflow")?;
-        if required == fee && required == archival_burn {
+        let required_archival = size
+            .checked_mul(archival_burn_rate)
+            .ok_or("transaction archival burn overflow")?;
+        if required_fee == fee && required_archival == archival_burn {
             return Ok(transaction);
         }
-        fee = required;
-        archival_burn = required;
+        fee = required_fee;
+        archival_burn = required_archival;
     }
     Err("automatic transaction fee did not converge".into())
 }
@@ -294,4 +311,101 @@ pub(super) fn submit_or_print_transaction(
     println!("Tx Hash: {}", response.hash);
     println!("Bytes: {}", transaction_bytes.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod state_burn_tests {
+    use super::*;
+
+    fn wallet() -> AccountWallet {
+        wallet::account_wallet_from_bip39_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            Signature::MlDsa44,
+        ).unwrap()
+    }
+
+    fn build(
+        wallet: &AccountWallet,
+        fee: u64,
+        archival: u64,
+    ) -> Result<AuthorizedProgramEnvelope, String> {
+        let change = 1_000_000u64
+            .checked_sub(fee)
+            .and_then(|v| v.checked_sub(archival))
+            .ok_or("insufficient fixture funds")?;
+        let payment = CoinTransition::coin_with_charges(
+            wallet.program_id,
+            vec![CoinShare::from_bytes([3; CoinShare::SIZE])],
+            vec![CoinOutput::new(wallet.program_id, Zeno::from_zeno(change))],
+            CoinCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(AuthorizedProgramEnvelope::Program(Box::new(
+            wallet.sign_xpq_transfer(payment)?,
+        )))
+    }
+
+    #[test]
+    fn automatic_transaction_converges_with_independent_fee_and_burn_rates() {
+        let wallet = wallet();
+        for (fee_rate, burn_rate) in [(8, 1), (1, 8), (8, 8)] {
+            let tx = automatic_fee_transaction_at_rates(
+                |fee, archival| build(&wallet, fee, archival),
+                fee_rate,
+                burn_rate,
+            )
+            .unwrap();
+            let size = canonical_bytes(&tx).unwrap().len() as u64;
+            let AuthorizedProgramEnvelope::Program(invocation) = &tx;
+            assert_eq!(
+                canonical_bytes(&kernel::operation::BlockOperation::ProgramCall(
+                    invocation.clone()
+                ))
+                .unwrap()
+                .len() as u64,
+                size
+            );
+            assert_eq!(
+                invocation.payment.charges.miner_fee.as_zeno(),
+                size * fee_rate
+            );
+            let output = invocation.payment.coin_parts().unwrap().1[0]
+                .amount
+                .as_zeno();
+            assert_eq!(
+                1_000_000 - output - invocation.payment.charges.miner_fee.as_zeno(),
+                size * burn_rate
+            );
+            assert!(
+                tx.verify_authorizations(kernel::genesis::chain_context().unwrap(), 0)
+                    .unwrap()
+            );
+        }
+        let tx = automatic_fee_transaction(|fee, archival| build(&wallet, fee, archival)).unwrap();
+        let size = canonical_bytes(&tx).unwrap().len() as u64;
+        let AuthorizedProgramEnvelope::Program(invocation) = &tx;
+        assert_eq!(
+            invocation.payment.charges.miner_fee.as_zeno(),
+            size * AUTOMATIC_FEE_ZENO_PER_BYTE
+        );
+        assert_eq!(
+            1_000_000
+                - invocation.payment.coin_parts().unwrap().1[0]
+                    .amount
+                    .as_zeno()
+                - invocation.payment.charges.miner_fee.as_zeno(),
+            size * kernel::consensus::STATE_BURN_RATE_ZENO_PER_BYTE
+        );
+    }
+
+    #[test]
+    fn automatic_transaction_rejects_fee_and_archival_overflow() {
+        let fixture = build(&wallet(), 0, 0).unwrap();
+        let fee = automatic_fee_transaction_at_rates(|_, _| Ok(fixture.clone()), u64::MAX, 1)
+            .unwrap_err();
+        assert!(fee.contains("transaction fee overflow"));
+        let burn = automatic_fee_transaction_at_rates(|_, _| Ok(fixture.clone()), 1, u64::MAX)
+            .unwrap_err();
+        assert!(burn.contains("archival burn overflow"));
+    }
 }

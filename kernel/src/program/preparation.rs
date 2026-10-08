@@ -43,7 +43,6 @@ pub fn program_created_state_weight_with_applications(
 ) -> Result<u64, crate::consensus::ProgramConsensusError> {
     use crate::consensus::{BurnError, ProgramConsensusError as Error};
     transaction.validate_structure().map_err(Error::Intent)?;
-    let mut preview = extensions.clone();
     let call = match decode_program(&transaction.call)
         .map_err(|_| Error::Intent(crate::program::IntentError::InvalidAssetCall))?
     {
@@ -58,24 +57,22 @@ pub fn program_created_state_weight_with_applications(
         &transaction.payment,
     ))
     .map_err(|_| Error::Encoding)?;
-    crate::program::asset_host::execute_asset(
-        applications,
-        &mut preview.assets,
-        &call,
-        ExecutionContext {
-            actor: Owner::Address(transaction.signer),
-            commitment: domain(HashDomain::AssetIntent, &commitment).into_bytes(),
-        },
-    )
-    .map_err(|_| Error::Intent(crate::program::IntentError::InvalidAssetCall))?;
-    let before = canonical_bytes(extensions)
-        .map_err(|_| Error::Encoding)?
-        .len();
-    let after = canonical_bytes(&preview)
-        .map_err(|_| Error::Encoding)?
-        .len();
-    let created_state_weight = u64::try_from(after.saturating_sub(before))
-        .map_err(|_| Error::Burn(BurnError::WeightOverflow))?;
+    let context = ExecutionContext {
+        actor: Owner::Program(transaction.signer),
+        commitment: domain(HashDomain::AssetIntent, &commitment).into_bytes(),
+    };
+    let mut preview = extensions
+        .assets
+        .operation_view(&call, context)
+        .map_err(|_| Error::Intent(crate::program::IntentError::InvalidAssetCall))?;
+    let journal =
+        crate::program::asset_host::execute_asset(applications, &mut preview, &call, context)
+            .map_err(|_| Error::Intent(crate::program::IntentError::InvalidAssetCall))?;
+    let delta = journal
+        .canonical_delta(&preview)
+        .map_err(|_| Error::Encoding)?;
+    let created_state_weight =
+        u64::try_from(delta.max(0)).map_err(|_| Error::Burn(BurnError::WeightOverflow))?;
     Ok(created_state_weight)
 }
 

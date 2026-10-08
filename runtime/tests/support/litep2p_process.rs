@@ -10,7 +10,7 @@ use std::{
 };
 
 use kernel::{
-    crypto::{Signature, SigningSeed, address_from_public_key, address_to_string, canonical_bytes},
+    crypto::{Signature, SigningSeed, program_id_from_public_key, program_id_to_string, canonical_bytes},
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     program::{AuthorizedProgramEnvelope, CoinTransition, ProgramEnvelope as Transaction},
 };
@@ -48,8 +48,8 @@ fn free_address() -> String {
     listener.local_addr().unwrap().to_string()
 }
 
-fn miner_address() -> String {
-    address_to_string(&sender_wallet().address)
+fn miner_program_id() -> String {
+    program_id_to_string(&sender_wallet().program_id)
 }
 
 fn sender_wallet() -> AccountWallet {
@@ -58,7 +58,7 @@ fn sender_wallet() -> AccountWallet {
 }
 
 fn mine(database: &Path, blocks: u64) {
-    mine_to(database, blocks, &miner_address());
+    mine_to(database, blocks, &miner_program_id());
 }
 
 fn mine_to(database: &Path, blocks: u64, address: &str) {
@@ -181,7 +181,7 @@ fn post_program_rpc(rpc: &str, route: &str, transaction: &Transaction) -> Value 
 }
 
 fn account(rpc: &str, address: &str) -> Result<Value, String> {
-    http_get(rpc, &format!("/account/{address}"))
+    http_get(rpc, &format!("/program/account/{address}"))
 }
 
 fn wait_for_status(rpc: &str, predicate: impl Fn(&Value) -> bool) -> Value {

@@ -15,7 +15,7 @@ use crypto::{
 pub const POW_ALGORITHM: &str = "xparq-argon2id-algorithm";
 
 // Consensus parameters. Do not change on an existing chain without a hard fork.
-pub const POW_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
+pub const POW_ARGON2_MEMORY_KIB: u32 = 128 * 1024;
 pub const POW_ARGON2_ITERATIONS: u32 = 1;
 pub const POW_ARGON2_LANES: u32 = 1;
 
@@ -50,6 +50,10 @@ pub fn calculate_work_with_memory(
     header: &Header,
     memory: &mut PoWMemory,
 ) -> Result<PoWHash, ConsensusError> {
+    // Reusing memory must not select different consensus parameters.
+    if memory.memory_kib() != POW_ARGON2_MEMORY_KIB as usize {
+        return Err(ConsensusError::InvalidPoWParameters);
+    }
     let seed = pow_seed(header)?;
     let salt = pow_salt(&header.previous_hash);
 

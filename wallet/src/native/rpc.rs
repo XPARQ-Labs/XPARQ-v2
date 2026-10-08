@@ -7,11 +7,14 @@ use serde::Deserialize;
 
 use super::AccountResponse;
 
-pub(super) fn fetch_account(rpc: &str, address: &str) -> Result<AccountResponse, String> {
-    let mut response: AccountResponse = http_get_json(rpc, &format!("/account/{address}"))?;
+pub(super) fn fetch_account(rpc: &str, program_id: &str) -> Result<AccountResponse, String> {
+    let mut response: AccountResponse =
+        http_get_json(rpc, &format!("/program/account/{program_id}"))?;
     while let Some(cursor) = response.next_utxo_cursor.clone() {
-        let page: AccountResponse =
-            http_get_json(rpc, &format!("/account/{address}?utxo_after={cursor}"))?;
+        let page: AccountResponse = http_get_json(
+            rpc,
+            &format!("/program/account/{program_id}?utxo_after={cursor}"),
+        )?;
         if page.utxos.is_empty() {
             return Err("node returned an invalid empty account page".into());
         }

@@ -12,6 +12,7 @@ impl RunConfig {
         let mut miner = None;
         let mut public_addr = None;
         let mut nat_traversal = false;
+        let mut chain_minimums = super::chain_minimums::ChainMinimums::default();
         #[cfg(feature = "litep2p-devnet")]
         let mut litep2p = false;
         #[cfg(feature = "litep2p-devnet")]
@@ -39,7 +40,7 @@ impl RunConfig {
                 }
                 "--miner" => {
                     index += 1;
-                    miner = Some(parse_address(
+                    miner = Some(parse_program_id(
                         args.get(index).ok_or("missing value for --miner")?,
                     )?);
                 }
@@ -51,6 +52,25 @@ impl RunConfig {
                             .parse()
                             .map_err(|_| "invalid --public-addr endpoint")?,
                     );
+                }
+                "--minimum-chain-work" => {
+                    index += 1;
+                    chain_minimums.work = super::chain_minimums::parse_work(
+                        args.get(index)
+                            .ok_or("missing value for --minimum-chain-work")?,
+                    )?;
+                }
+                "--minimum-chain-weight" => {
+                    index += 1;
+                    let value = args
+                        .get(index)
+                        .ok_or("missing value for --minimum-chain-weight")?;
+                    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err("--minimum-chain-weight must be an unsigned decimal u64".into());
+                    }
+                    chain_minimums.weight = value
+                        .parse::<u64>()
+                        .map_err(|_| "--minimum-chain-weight exceeds u64")?;
                 }
                 "--nat-traversal" => nat_traversal = true,
                 #[cfg(feature = "litep2p-devnet")]
@@ -86,6 +106,7 @@ impl RunConfig {
             miner,
             public_addr,
             nat_traversal,
+            chain_minimums,
             #[cfg(feature = "litep2p-devnet")]
             litep2p,
             #[cfg(feature = "litep2p-devnet")]
@@ -244,10 +265,10 @@ pub(super) fn print_network_info() -> Result<(), String> {
 pub(super) fn print_help() {
     #[cfg(feature = "litep2p-devnet")]
     println!(
-        "node run --litep2p [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS@PEER_ID]... [--miner ADDRESS] [--sync-staging-mib 2..1048576] [--public-addr HOST:PORT] [--litep2p-private-discovery]"
+        "node run --litep2p [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS@PEER_ID]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--sync-staging-mib 2..1048576] [--public-addr HOST:PORT] [--litep2p-private-discovery]"
     );
     println!(
-        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode litep2p [data-dir] [listen-address] [peer-address...] (requires litep2p-devnet feature)\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode account [data-dir] <address>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-address>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-deploy [data-dir] <authorized-deploy-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
+        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner PROGRAM_ID] [--minimum-chain-work HEX] [--minimum-chain-weight DECIMAL] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode litep2p [data-dir] [listen-address] [peer-address...] (requires litep2p-devnet feature)\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode program-account [data-dir] <program-id>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-program-id>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-deploy [data-dir] <authorized-deploy-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
     );
 }
 
@@ -366,5 +387,35 @@ mod staging_budget_tests {
                 .private_discovery
         );
         assert!(RunConfig::parse(&["--litep2p-private-discovery".into()]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod chain_minimums_tests {
+    use super::*;
+
+    #[test]
+    fn command_line_parses_floors_and_rejects_missing_invalid_and_overflow_values() {
+        let config = RunConfig::parse(&[]).unwrap();
+        assert_eq!(
+            config.chain_minimums,
+            super::super::chain_minimums::ChainMinimums::default()
+        );
+        let config = RunConfig::parse(&[
+            "--minimum-chain-work".into(),
+            "0x10000000000000000".into(),
+            "--minimum-chain-weight".into(),
+            "18446744073709551615".into(),
+        ])
+        .unwrap();
+        assert_eq!(config.chain_minimums.work, Work::pow2(64));
+        assert_eq!(config.chain_minimums.weight, u64::MAX);
+        for flag in ["--minimum-chain-work", "--minimum-chain-weight"] {
+            assert!(RunConfig::parse(&[flag.into()]).is_err());
+        }
+        for value in ["-1", "+1", "bad", "18446744073709551616", ""] {
+            assert!(RunConfig::parse(&["--minimum-chain-weight".into(), value.into()]).is_err());
+        }
+        assert!(RunConfig::parse(&["--minimum-chain-work".into(), "f".repeat(129)]).is_err());
     }
 }

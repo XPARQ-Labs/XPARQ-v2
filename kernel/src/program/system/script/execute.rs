@@ -15,20 +15,23 @@ pub enum DecodedProgramCall {
 /// Decode a call before any state transition. This does not execute it.
 pub fn decode_program(call: &ProgramCall) -> Result<DecodedProgramCall, ProgramError> {
     match call.program {
-        SystemProgramId::XPQ => {
-            crate::program::system::coin_program::decode(call.opcode, &call.payload)?;
-            Ok(DecodedProgramCall::XpqTransfer)
+        SystemProgramId::MONETARY => {
+            match super::super::monetary::decode(call.opcode, &call.payload)? {
+                super::super::monetary::MonetaryCall::TransferCoin => {
+                    Ok(DecodedProgramCall::XpqTransfer)
+                }
+                super::super::monetary::MonetaryCall::Asset(call) => {
+                    Ok(DecodedProgramCall::Asset(call))
+                }
+            }
         }
         SystemProgramId::ASSET => {
             asset_program::decode(call.opcode, &call.payload).map(DecodedProgramCall::Asset)
         }
-        SystemProgramId::VM if call.opcode == 0 => {
-            let id = call
-                .payload
-                .as_slice()
-                .try_into()
+        SystemProgramId::VM => {
+            let (id, _) = crate::program::vm_app::call_input(call)
                 .map_err(|_| ProgramError::InvalidPayload)?;
-            Ok(DecodedProgramCall::Vm(id))
+            Ok(DecodedProgramCall::Vm(id.into_bytes()))
         }
         _ => Err(ProgramError::UnknownProgram),
     }

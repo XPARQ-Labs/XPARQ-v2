@@ -2,7 +2,7 @@ use kernel::{
     block::{Block, Emission, GENESIS_TARGET_BITS},
     blockchain::Chain,
     common::{Height, Nonce},
-    crypto::Address,
+    crypto::ProgramId,
     genesis::genesis_block,
     monetary::coin::Zeno,
 };
@@ -18,7 +18,7 @@ fn eviction_keeps_all_headers_and_rehydration_rejects_a_different_branch() {
             chain.tip_hash().unwrap(),
             GENESIS_TARGET_BITS,
             Nonce(0),
-            Some(Emission::new(Address([3; 32]), Zeno::ONE)),
+            Some(Emission::new(ProgramId([3; 32]), Zeno::ONE)),
             vec![],
         )
         .unwrap();

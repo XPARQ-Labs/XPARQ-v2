@@ -9,6 +9,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 pub const MAGIC: [u8; 4] = *b"XPVM";
 pub const VERSION: u8 = 1;
+pub const APPLICATION_VERSION: u8 = 4;
 pub const ASSET_ISSUANCE_VERSION: u8 = 3;
 pub const MAX_STACK_ITEMS: u16 = 256;
 pub const MAX_MEMORY_PAGES: u16 = 16;
@@ -59,6 +60,11 @@ pub enum ExecutionError {
     UnknownProgram,
     OutOfFuel,
     ArithmeticOverflow,
+    InvalidOperand,
+    Reverted,
+    ResourceLimit,
+    ReentrantCall,
+    SettlementFailed,
 }
 
 /// Resolve deployed code from the canonical registry before interpreting it.
@@ -84,6 +90,9 @@ fn execute_code_with_state(
     initial_state: i64,
     fuel_limit: u64,
 ) -> Result<ExecutionResult, ExecutionError> {
+    if code.get(4) == Some(&APPLICATION_VERSION) {
+        return Err(ExecutionError::InvalidOperand); // Application execution requires an authenticated kernel context.
+    }
     let validated = validate_code(code).map_err(ExecutionError::InvalidCode)?;
     let memory_cost = u64::from(validated.memory_pages) * MEMORY_PAGE_COST;
     let fuel_used = memory_cost
@@ -174,6 +183,9 @@ fn execute_code_with_state(
 /// i64.add(02), return(03), state.get(04), state.set(05). State access is
 /// limited to the program's own fixed-size i64 slot; there are no branches.
 pub fn validate_code(code: &[u8]) -> Result<ValidatedCode, CodeError> {
+    if code.get(4) == Some(&APPLICATION_VERSION) {
+        return super::vm_app::validate_code(code);
+    }
     if code.len() < HEADER_LEN || code[..4] != MAGIC {
         return Err(CodeError::InvalidHeader);
     }
@@ -341,14 +353,14 @@ mod tests {
         code.extend_from_slice(&7u64.to_le_bytes());
         code.push(3);
         assert_eq!(validate_code(&code).unwrap().instruction_count, 2);
-        code[4] = 4;
+        code[4] = 5;
         assert_eq!(validate_code(&code), Err(CodeError::UnsupportedVersion));
     }
 
     #[test]
     fn transfer_instructions_are_bounded_metered_and_versioned() {
         let request = TransferRequest {
-            recipient: Owner::Address(crypto::Address::ZERO),
+            recipient: Owner::Program(crypto::ProgramId::ZERO),
             amount: 3,
         };
         let mut code = b"XPVM".to_vec();
@@ -404,7 +416,7 @@ mod tests {
         };
         let mint = MintAssetRequest {
             asset: MintAssetTarget::Registered,
-            recipient: Owner::Address(crypto::Address::ZERO),
+            recipient: Owner::Program(crypto::ProgramId::ZERO),
             amount: Unit::from_units(u64::MAX as u128 + 1),
         };
         let code = issuance_code(&register, &mint);
@@ -417,7 +429,7 @@ mod tests {
             execute_code(&code, fuel - 1),
             Err(ExecutionError::OutOfFuel)
         );
-        for version in [1, 2, 4] {
+        for version in [1, 2, 5] {
             let mut invalid = code.clone();
             invalid[4] = version;
             assert!(validate_code(&invalid).is_err());
@@ -540,7 +552,7 @@ mod tests {
         let (id, _) = deploy_program(
             &mut registry,
             DeployProgram {
-                owner: crypto::Address::ZERO,
+                owner: crypto::ProgramId::ZERO,
                 nonce: 1,
                 code: code.into(),
             },
@@ -566,7 +578,7 @@ mod tests {
         let (id, _) = deploy_program(
             &mut state.programs,
             DeployProgram {
-                owner: crypto::Address::ZERO,
+                owner: crypto::ProgramId::ZERO,
                 nonce: 1,
                 code: code.into(),
             },
@@ -662,7 +674,9 @@ pub struct MintAssetRequest {
 pub const ASSET_REGISTER_COST: u64 = 40;
 pub const ASSET_MINT_COST: u64 = 20;
 
-fn decode_register_request(bytes: &mut &[u8]) -> Result<RegisterAssetRequest, CodeError> {
+pub(crate) fn decode_register_request(
+    bytes: &mut &[u8],
+) -> Result<RegisterAssetRequest, CodeError> {
     // Bound the string before Borsh allocates it, including when called outside deployment.
     let length = bytes.get(..4).ok_or(CodeError::InvalidInstruction)?;
     let length = u32::from_le_bytes(length.try_into().unwrap()) as usize;

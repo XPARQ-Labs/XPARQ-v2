@@ -22,6 +22,7 @@ impl Chain {
     }
 
     pub fn insert_block(&mut self, block: Block) -> Result<(), ChainError> {
+        // Ledger commit relies on all fallible operations preceding mutation.
         self.validate_next_block(&block)?;
 
         let height = block.height();

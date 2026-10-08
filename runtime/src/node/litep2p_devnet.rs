@@ -188,6 +188,7 @@ struct PeerSync {
     checkpoints: Arc<Vec<super::state::HeaderStateCheckpoint>>,
     local_work: Work,
     local_weight: u64,
+    minimums: super::chain_minimums::ChainMinimums,
     local_locator: Vec<([u8; 32], Height)>,
     validation: Option<HeaderValidationState>,
     ancestor: Option<(Height, BlockHash)>,
@@ -209,6 +210,7 @@ impl PeerSync {
             checkpoints,
             local_work,
             local_weight,
+            minimums: super::chain_minimums::configured(database)?,
             local_locator,
             validation: None,
             ancestor: None,
@@ -339,15 +341,18 @@ impl PeerSync {
             .as_ref()
             .ok_or("missing verified header state")?;
         let local_hash = self.ledger.tip_hash().ok_or("local chain has no tip")?;
-        Ok(compare_chain_tips(
-            state.cumulative_work,
-            state.cumulative_weight,
-            state.header.hash().map_err(|error| error.to_string())?,
-            self.local_work,
-            self.local_weight,
-            local_hash,
-        )
-        .is_gt())
+        Ok(self
+            .minimums
+            .allows(state.cumulative_work, state.cumulative_weight)
+            && compare_chain_tips(
+                state.cumulative_work,
+                state.cumulative_weight,
+                state.header.hash().map_err(|error| error.to_string())?,
+                self.local_work,
+                self.local_weight,
+                local_hash,
+            )
+            .is_gt())
     }
 
     fn into_result(self) -> Result<(HeaderSyncResult, super::sync_stage::DiskStage), String> {
@@ -507,6 +512,13 @@ fn process_response(
             let claim: Handshake = canonical_decode(&response[1..])
                 .map_err(|error| format!("decode peer tip: {error}"))?;
             validate_handshake(&claim)?;
+            if !super::chain_minimums::allows(
+                database,
+                Work::from_be_limbs(claim.cumulative_work),
+                claim.cumulative_weight,
+            )? {
+                return Ok(None);
+            }
             let session = PeerSync::new(database, claim)?;
             let local_hash = session.ledger.tip_hash().ok_or("local chain has no tip")?;
             let claimed_work = Work::from_be_limbs(session.claim.cumulative_work);
@@ -1165,7 +1177,7 @@ mod tests {
         source.session();
         let receiver = Database::new();
         receiver.session();
-        let miner = super::super::Address([71; kernel::crypto::ADDRESS_SIZE]);
+        let miner = super::super::ProgramId([71; kernel::crypto::PROGRAM_ID_SIZE]);
         let mut memory = new_pow_memory();
         assert!(matches!(
             mine_block_database(&source.0, miner, 0, 1000, &mut memory).unwrap(),
@@ -1193,6 +1205,43 @@ mod tests {
         assert_eq!(session.headers.len(), 1);
         assert_eq!(session.validation.as_ref().unwrap().height, Height(1));
         assert!(session.preferred().unwrap());
+    }
+
+    #[test]
+    fn chain_minimums_filter_litep2p_claims_before_allocating_a_header_session() {
+        use super::super::chain_minimums::{ChainMinimums, configure};
+        let database = Database::new();
+        database.session();
+        configure(
+            &database.0,
+            ChainMinimums {
+                work: Work::pow2(70),
+                weight: 100,
+            },
+        )
+        .unwrap();
+        let original = cached_handshake(&database.0).unwrap();
+        for (work, weight) in [(Work::pow2(69), u64::MAX), (Work::MAX, 99)] {
+            let mut claim = original.clone();
+            claim.cumulative_work = work.to_be_limbs();
+            claim.cumulative_weight = weight;
+            let mut response = vec![REQUEST_TIP];
+            response.extend(canonical_bytes(&claim).unwrap());
+            let mut sessions = HashMap::new();
+            assert!(
+                process_response(
+                    &database.0,
+                    PeerId::random(),
+                    PendingKind::Tip,
+                    &response,
+                    &mut sessions,
+                    super::super::sync_stage::DEFAULT_STAGING_BYTES
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert!(sessions.is_empty());
+        }
     }
 
     #[test]

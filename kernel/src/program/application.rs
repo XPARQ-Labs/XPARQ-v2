@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::common::Owner;
-use crypto::Address;
+use crypto::ProgramId;
 
 use super::system::{
     asset_program::{
@@ -31,7 +31,7 @@ pub trait ApplicationExecutor: Send + Sync {
         host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
         outputs: &[(Owner, u64)],
-        miner: Address,
+        miner: ProgramId,
         miner_fee: u64,
     ) -> Result<(), TransferError<StateError>>;
 
@@ -66,7 +66,7 @@ impl ApplicationExecutor for NoApplications {
         _: &mut dyn CoinHost<Error = StateError>,
         _: &[CoinShare],
         _: &[(Owner, u64)],
-        _: Address,
+        _: ProgramId,
         _: u64,
     ) -> Result<(), TransferError<StateError>> {
         Err(TransferError::Host(StateError::InvalidTransition))

@@ -1,8 +1,8 @@
 use bip39::{Language, Mnemonic};
 
 use kernel::crypto::{
-    Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
-    address_to_string, hash_bytes,
+    ProgramId, PublicKey, Signature, SigningSeed, hash_bytes, program_id_from_public_key,
+    program_id_from_string, program_id_to_string,
 };
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub const BIP39_MNEMONIC_24_ENTROPY_BYTES: usize = 32;
 pub struct AccountWallet {
     pub mnemonic: Option<String>,
 
-    pub address: Address,
+    pub program_id: ProgramId,
 
     pub public_key: PublicKey,
 
@@ -37,7 +37,7 @@ impl Drop for AccountWallet {
 #[serde(deny_unknown_fields)]
 
 struct WalletFile {
-    address: String,
+    program_id: String,
 
     mnemonic: String,
 
@@ -54,14 +54,15 @@ struct WalletFile {
 #[derive(Deserialize)]
 
 struct WalletHeader {
-    address: String,
+    program_id: String,
 }
 
-pub fn wallet_address_from_file_bytes(bytes: &[u8]) -> Result<Address, String> {
+pub fn wallet_program_id_from_file_bytes(bytes: &[u8]) -> Result<ProgramId, String> {
     let header: WalletHeader = serde_json::from_slice(bytes)
         .map_err(|error| format!("failed to parse wallet: {error}"))?;
 
-    address_from_string(&header.address).map_err(|error| format!("invalid wallet address: {error}"))
+    program_id_from_string(&header.program_id)
+        .map_err(|error| format!("invalid wallet program_id: {error}"))
 }
 
 pub fn account_wallet_file_bytes(wallet: &AccountWallet) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -73,7 +74,7 @@ pub fn account_wallet_file_bytes(wallet: &AccountWallet) -> Result<Zeroizing<Vec
     decode_bip39_mnemonic(mnemonic)?;
 
     let wallet_file = WalletFile {
-        address: address_to_string(&wallet.address),
+        program_id: program_id_to_string(&wallet.program_id),
 
         mnemonic: mnemonic.to_string(),
 
@@ -106,11 +107,13 @@ pub fn account_wallet_from_file_bytes(bytes: &[u8]) -> Result<AccountWallet, Str
 
     let mut wallet = account_wallet_from_bip39_mnemonic(&wallet_file.mnemonic, account)?;
 
-    let stored_address = address_from_string(&wallet_file.address)
-        .map_err(|error| format!("invalid wallet address: {error}"))?;
+    let stored_program_id = program_id_from_string(&wallet_file.program_id)
+        .map_err(|error| format!("invalid wallet program_id: {error}"))?;
 
-    if wallet.address != stored_address {
-        return Err("wallet address does not match its mnemonic and signature account".to_string());
+    if wallet.program_id != stored_program_id {
+        return Err(
+            "wallet program-id does not match its mnemonic and signature account".to_string(),
+        );
     }
 
     if let Some(public_key) = wallet_file.public_key.as_deref()
@@ -190,7 +193,7 @@ pub fn account_wallet_from_bip39_mnemonic(
     Ok(AccountWallet {
         mnemonic: None,
 
-        address: address_from_public_key(&public_key).map_err(|error| error.to_string())?,
+        program_id: program_id_from_public_key(&public_key).map_err(|error| error.to_string())?,
 
         public_key,
 
@@ -255,10 +258,10 @@ impl AccountWallet {
     ) -> Result<kernel::program::AuthorizedProgramInvocation, String> {
         let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
         let commitment =
-            kernel::program::program_invocation_commitment(self.address, &call, &payment, chain)
+            kernel::program::program_invocation_commitment(self.program_id, &call, &payment, chain)
                 .map_err(|e| e.to_string())?;
         Ok(kernel::program::AuthorizedProgramInvocation {
-            signer: self.address,
+            signer: self.program_id,
             call,
             payment,
             authorization: kernel::program::AccountAuthorization {
@@ -273,8 +276,8 @@ impl AccountWallet {
         deploy: kernel::program::DeployProgram,
         payment: kernel::program::CoinTransition,
     ) -> Result<kernel::operation::AuthorizedDeployProgram, String> {
-        if deploy.owner != self.address {
-            return Err("deploy owner does not match wallet address".into());
+        if deploy.owner != self.program_id {
+            return Err("deploy owner does not match wallet program_id".into());
         }
         let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
         let mut signed = kernel::operation::AuthorizedDeployProgram {
@@ -313,7 +316,7 @@ mod tests {
 
         let decoded = wallet_from_file_bytes(&encoded).unwrap();
 
-        assert_eq!(decoded.address, wallet.address);
+        assert_eq!(decoded.program_id, wallet.program_id);
 
         assert_eq!(decoded.public_key, wallet.public_key);
 
@@ -325,9 +328,9 @@ mod tests {
 
         assert_eq!(
 
-            json.get("address").unwrap().as_str(),
+            json.get("program_id").unwrap().as_str(),
 
-            Some(wallet_address_string(&wallet).as_str())
+            Some(wallet_program_id_string(&wallet).as_str())
 
         );
 
@@ -339,7 +342,7 @@ mod tests {
 
     #[test]
 
-    fn wallet_address_reader_accepts_legacy_version_field() {
+    fn wallet_program_id_reader_accepts_legacy_version_field() {
 
         let mnemonic = encode_bip39_mnemonic(&[8; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
 
@@ -349,7 +352,7 @@ mod tests {
 
             "version": 1,
 
-            "address": wallet_address_string(&wallet),
+            "program_id": wallet_program_id_string(&wallet),
 
             "mnemonic": mnemonic,
 
@@ -357,7 +360,7 @@ mod tests {
 
         .unwrap();
 
-        assert_eq!(wallet_address_from_file_bytes(&encoded), Ok(wallet.address));
+        assert_eq!(wallet_program_id_from_file_bytes(&encoded), Ok(wallet.program_id));
 
     }
 
@@ -379,15 +382,15 @@ mod tests {
 
         let restored_file = wallet_file_bytes(&restored).unwrap();
 
-        assert_eq!(first.address, restored.address);
+        assert_eq!(first.program_id, restored.program_id);
 
         assert_eq!(first.public_key, restored.public_key);
 
         assert_eq!(
 
-            wallet_from_file_bytes(&first_file).unwrap().address,
+            wallet_from_file_bytes(&first_file).unwrap().program_id,
 
-            wallet_from_file_bytes(&restored_file).unwrap().address
+            wallet_from_file_bytes(&restored_file).unwrap().program_id
 
         );
 
@@ -397,7 +400,7 @@ mod tests {
 
     #[test]
 
-    fn mnemonic_derives_distinct_recoverable_account_addresses() {
+    fn mnemonic_derives_distinct_recoverable_account_program_ids() {
         let mnemonic = encode_bip39_mnemonic(&[12; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
 
         let accounts = [Signature::MlDsa44, Signature::MlDsa65, Signature::MlDsa87];
@@ -409,12 +412,12 @@ mod tests {
             accounts.map(|account| account_wallet_from_bip39_mnemonic(&mnemonic, account).unwrap());
 
         for (left, right) in first.iter().zip(&second) {
-            assert_eq!(left.address, right.address);
+            assert_eq!(left.program_id, right.program_id);
         }
 
         let unique = first
             .iter()
-            .map(|wallet| wallet.address)
+            .map(|wallet| wallet.program_id)
             .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(unique.len(), accounts.len());
@@ -456,7 +459,7 @@ mod tests {
 
             assert_eq!(restored.account(), account);
 
-            assert_eq!(restored.address, wallet.address);
+            assert_eq!(restored.program_id, wallet.program_id);
 
             assert_eq!(restored.public_key, wallet.public_key);
         }

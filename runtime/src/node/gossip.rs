@@ -138,7 +138,12 @@ pub(super) fn gossip_outbound_session(
         let remote = decode_gossip_inventory(&response[1..])?;
 
         if remote.tip_hash != local_before.tip_hash {
-            if inventory_preferred(&remote, &local_before) {
+            let remote_allowed = super::chain_minimums::allows(
+                database,
+                Work::from_be_limbs(remote.cumulative_work),
+                remote.cumulative_weight,
+            )?;
+            if remote_allowed && inventory_preferred(&remote, &local_before) {
                 if remote.tip_height.0 == local_before.tip_height.0.saturating_add(1) {
                     request_and_accept_gossip_block(database, stream, remote.tip_hash)?;
                     generation = gossip_generation()?;
@@ -174,6 +179,10 @@ pub(super) fn gossip_outbound_session(
                 }
             }
 
+            if !remote_allowed {
+                generation = wait_for_gossip(generation)?;
+                continue;
+            }
             return Err(format!(
                 "{GOSSIP_RESYNC_PREFIX} tips diverged; reconnecting for verified header sync"
             ));
@@ -355,6 +364,7 @@ pub(super) fn accept_relayed_block(database: &Path, bytes: &[u8]) -> Result<(), 
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
+    let (_, _, current_work, current_weight) = load_or_initialize_header_snapshot(database)?;
     let mut ledger = load_or_initialize_owned(database)?;
     if ledger.tip_hash() == Some(hash) {
         return Ok(());
@@ -364,6 +374,14 @@ pub(super) fn accept_relayed_block(database: &Path, bytes: &[u8]) -> Result<(), 
             "{GOSSIP_RESYNC_PREFIX} relayed block does not directly extend the canonical tip"
         ));
     }
+    let block_work = kernel::consensus::block_work(block.header.target_bits)
+        .ok_or("relayed block has invalid target bits")?;
+    let next_work = current_work.saturating_add(block_work);
+    let next_weight = current_weight.saturating_add(u64::from(block.header.block_weight));
+    if !super::chain_minimums::allows(database, next_work, next_weight)? {
+        return Err("relayed chain is below configured work/weight minimums".into());
+    }
+    // Above-floor advertised totals never bypass PoW, weight or execution checks.
     apply_block(&mut ledger, block.clone())
         .map_err(|error| format!("invalid relayed block: {error}"))?;
     let included = block

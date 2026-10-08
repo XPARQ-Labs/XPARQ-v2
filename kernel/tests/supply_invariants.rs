@@ -1,4 +1,4 @@
-use crypto::{Address, HASH16_SIZE};
+use crypto::{ProgramId, HASH16_SIZE};
 use kernel::{
     ledger::{CoinUtxo, LedgerError, LedgerState},
     monetary::coin::{CoinShare, Zeno},
@@ -16,7 +16,7 @@ fn coin_utxos_must_equal_recorded_live_supply() {
         id,
         CoinUtxo {
             amount: Zeno::from_zeno(90),
-            owner: kernel::common::Owner::Address(Address([2; crypto::ADDRESS_SIZE])),
+            owner: kernel::common::Owner::Program(ProgramId([2; crypto::PROGRAM_ID_SIZE])),
         },
     )]);
     state.utxos =
@@ -36,8 +36,8 @@ fn asset_fixture() -> LedgerState {
         asset::{AssetContract, AssetRecord, AssetShare, Metadata, Share, Unit},
         asset_state::AssetState,
     };
-    let owner = Address([3; crypto::ADDRESS_SIZE]);
-    let metadata = Metadata::new("Guard Test".into(), Unit::from_units(100), kernel::common::Owner::Address(owner), kernel::common::Owner::Address(owner)).unwrap();
+    let owner = ProgramId([3; crypto::PROGRAM_ID_SIZE]);
+    let metadata = Metadata::new("Guard Test".into(), Unit::from_units(100), kernel::common::Owner::Program(owner), kernel::common::Owner::Program(owner)).unwrap();
     let asset = AssetContract::derive(&metadata, 1).unwrap();
     let records = std::collections::BTreeMap::from([(
         asset,
@@ -51,7 +51,7 @@ fn asset_fixture() -> LedgerState {
     )]);
     let shares = std::collections::BTreeMap::from([(
         Share::from_bytes([4; HASH16_SIZE]),
-        AssetShare::new(asset, Unit::from_units(10), kernel::common::Owner::Address(owner)),
+        AssetShare::new(asset, Unit::from_units(10), kernel::common::Owner::Program(owner)),
     )]);
     let assets: AssetState =
         borsh::from_slice(&borsh::to_vec(&(records, shares)).unwrap()).unwrap();
@@ -115,12 +115,12 @@ fn balanced_zero_asset_share_and_invalid_metadata_are_rejected() {
 
 #[test]
 fn deep_coin_audit_rejects_forged_cache_and_balanced_zero_utxo() {
-    let owner = Address([2; crypto::ADDRESS_SIZE]);
+    let owner = ProgramId([2; crypto::PROGRAM_ID_SIZE]);
     let id = CoinShare::from_bytes([1; HASH16_SIZE]);
     let mut coins = std::collections::BTreeMap::from([(
         id,
         CoinUtxo {
-            owner: kernel::common::Owner::Address(owner),
+            owner: kernel::common::Owner::Program(owner),
             amount: Zeno::from_zeno(90),
         },
     )]);
@@ -138,7 +138,7 @@ fn deep_coin_audit_rejects_forged_cache_and_balanced_zero_utxo() {
     coins.insert(
         CoinShare::from_bytes([2; HASH16_SIZE]),
         CoinUtxo {
-            owner: kernel::common::Owner::Address(owner),
+            owner: kernel::common::Owner::Program(owner),
             amount: Zeno::ZERO,
         },
     );
@@ -179,7 +179,7 @@ fn aggregate_overflow_and_impossible_accounting_are_rejected() {
         kernel::monetary::asset::AssetShare::new(
             asset,
             kernel::monetary::asset::Unit::from_units(1),
-            kernel::common::Owner::Address(Address([3; crypto::ADDRESS_SIZE])),
+            kernel::common::Owner::Program(ProgramId([3; crypto::PROGRAM_ID_SIZE])),
         ),
     );
     state.extensions.assets =
@@ -189,19 +189,19 @@ fn aggregate_overflow_and_impossible_accounting_are_rejected() {
         Err(LedgerError::SupplyOverflow)
     ));
 
-    let owner = Address([1; crypto::ADDRESS_SIZE]);
+    let owner = ProgramId([1; crypto::PROGRAM_ID_SIZE]);
     let coins = std::collections::BTreeMap::from([
         (
             CoinShare::from_bytes([1; HASH16_SIZE]),
             CoinUtxo {
-                owner: kernel::common::Owner::Address(owner),
+                owner: kernel::common::Owner::Program(owner),
                 amount: Zeno::from_zeno(u64::MAX),
             },
         ),
         (
             CoinShare::from_bytes([2; HASH16_SIZE]),
             CoinUtxo {
-                owner: kernel::common::Owner::Address(owner),
+                owner: kernel::common::Owner::Program(owner),
                 amount: Zeno::ONE,
             },
         ),

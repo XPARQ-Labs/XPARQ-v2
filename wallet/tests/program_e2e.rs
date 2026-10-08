@@ -40,6 +40,24 @@ fn free() -> String {
         .unwrap()
         .to_string()
 }
+
+fn assert_rejected_get(rpc: &str, route: &str) {
+    let mut stream = TcpStream::connect(rpc).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {route} HTTP/1.1\r\nHost: {rpc}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 400"),
+        "legacy/invalid identity route accepted: {route}"
+    );
+}
 fn start(binary: &Path, db: &Path, rpc: &str, p2p: &str) -> Node {
     let child = Command::new(binary)
         .args([
@@ -64,10 +82,10 @@ fn start(binary: &Path, db: &Path, rpc: &str, p2p: &str) -> Node {
     }
     node
 }
-fn mine(binary: &Path, db: &Path, address: &str) {
+fn mine(binary: &Path, db: &Path, program_id: &str) {
     eprintln!("confirming pending operations with a mined block");
     let result = Command::new(binary)
-        .args(["mine-block", db.to_str().unwrap(), address])
+        .args(["mine-block", db.to_str().unwrap(), program_id])
         .output()
         .unwrap();
     assert!(
@@ -172,17 +190,34 @@ fn program_wallet_cli_lifecycle_and_recipient_history_survive_restart() {
             .unwrap();
     owner.mnemonic = Some(words.clone());
     fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
-    let address = kernel::crypto::address_to_string(&owner.address);
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
     let receiver = wallet::account_wallet_from_bip39_mnemonic(
         &wallet::encode_bip39_mnemonic(&[64; 16]).unwrap(),
         kernel::crypto::Signature::MlDsa44,
     )
     .unwrap();
-    let to = kernel::crypto::address_to_string(&receiver.address);
-    mine(&node_binary, &db, &address);
+    let to = kernel::crypto::program_id_to_string(&receiver.program_id);
+    mine(&node_binary, &db, &program_id);
     let rpc = free();
     let p2p = free();
     let mut node = start(&node_binary, &db, &rpc, &p2p);
+    let account_id = hex::encode(owner.program_id.into_bytes());
+    let display = cli(&file, &rpc, "program-id", &[]);
+    assert!(display.contains(&format!("Program ID: {account_id}")));
+    let account = get(&rpc, &format!("/program/account/{account_id}"));
+    for route in [
+        format!("/account/{account_id}"),
+        format!("/balance/{account_id}"),
+        format!("/explorer/address/{account_id}"),
+        format!("/program/account/{}", "0".repeat(45)),
+    ] {
+        assert_rejected_get(&rpc, &route);
+    }
+    assert_eq!(account["policy"], "signature");
+    assert_eq!(
+        account["coin_balance"],
+        get(&rpc, &format!("/program/account/{program_id}"))["total"]
+    );
     let output = cli(
         &file,
         &rpc,
@@ -202,7 +237,7 @@ fn program_wallet_cli_lifecycle_and_recipient_history_survive_restart() {
         .unwrap()
         .to_string();
     drop(node);
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     node = start(&node_binary, &db, &rpc, &p2p);
     for (command, args) in [
         (
@@ -211,7 +246,7 @@ fn program_wallet_cli_lifecycle_and_recipient_history_survive_restart() {
                 "--asset",
                 asset.as_str(),
                 "--to",
-                address.as_str(),
+                program_id.as_str(),
                 "--amount",
                 "20",
             ],
@@ -237,14 +272,21 @@ fn program_wallet_cli_lifecycle_and_recipient_history_survive_restart() {
     ] {
         cli(&file, &rpc, command, &args);
         drop(node);
-        mine(&node_binary, &db, &address);
+        mine(&node_binary, &db, &program_id);
         node = start(&node_binary, &db, &rpc, &p2p);
     }
     let metadata = get(&rpc, &format!("/program/asset/{asset}"));
+    assert_eq!(metadata["program_id"], 0);
+    assert_eq!(metadata["creator"]["type"], "program");
+    assert_eq!(metadata["creator"]["value"], account_id);
+    assert_eq!(metadata["mint_authority"], metadata["creator"]);
     assert_eq!(metadata["supply"], "5500000000");
     assert_eq!(metadata["total_minted"], "6000000000");
     assert_eq!(metadata["total_burned"], "500000000");
-    let balance = get(&rpc, &format!("/program/asset/{asset}/balance/{address}"));
+    let balance = get(
+        &rpc,
+        &format!("/program/asset/{asset}/balance/{program_id}"),
+    );
     assert_eq!(balance["balance"], "4000000000");
     assert_eq!(balance["shares"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -253,7 +295,7 @@ fn program_wallet_cli_lifecycle_and_recipient_history_survive_restart() {
     );
     let history = get(
         &rpc,
-        &format!("/explorer/address/{to}?include_emissions=false"),
+        &format!("/explorer/program/{to}?include_emissions=false"),
     );
     let activity = history["activities"]
         .as_array()
@@ -262,9 +304,11 @@ fn program_wallet_cli_lifecycle_and_recipient_history_survive_restart() {
         .find(|v| v["program"]["operation"] == "transfer")
         .unwrap();
     assert_eq!(activity["program"]["amount"], "1500000000");
+    assert_eq!(activity["program"]["program_id"], 0);
+    assert_eq!(activity["program"]["opcode"], 1);
     assert_eq!(activity["direction"], "in");
     assert!(
-        get(&rpc, &format!("/account/{to}"))["program_assets"]
+        get(&rpc, &format!("/program/account/{to}"))["program_assets"]
             .as_array()
             .unwrap()
             .iter()
@@ -300,7 +344,7 @@ fn program_history_cli_displays_asset_units_as_decimal_amounts() {
             .unwrap();
     owner.mnemonic = Some(words);
     fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
-    let address = kernel::crypto::address_to_string(&owner.address);
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let rpc = listener.local_addr().unwrap().to_string();
     let server = thread::spawn(move || {
@@ -309,7 +353,7 @@ fn program_history_cli_displays_asset_units_as_decimal_amounts() {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         read_request_headers(&mut stream).unwrap();
-        let body=serde_json::json!({"address":address,"tip_height":5,"emission_count":0,"activities":[{"height":4,"block_hash":"11","hash":"22","type":"program","direction":"in","amount":0,"size_bytes":3000,"program":{"operation":"transfer","asset":"33","amount":"1500000000"}}]}).to_string();
+        let body=serde_json::json!({"program_id":program_id,"tip_height":5,"emission_count":0,"activities":[{"height":4,"block_hash":"11","hash":"22","type":"program","direction":"in","amount":0,"size_bytes":3000,"program":{"operation":"transfer","asset":"33","amount":"1500000000"}}]}).to_string();
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -350,14 +394,14 @@ fn xpq_program_wallet_cli_spend_and_consolidation() {
             .unwrap();
     owner.mnemonic = Some(words);
     fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
-    let address = kernel::crypto::address_to_string(&owner.address);
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
     let receiver = wallet::account_wallet_from_bip39_mnemonic(
         &wallet::encode_bip39_mnemonic(&[75; 16]).unwrap(),
         kernel::crypto::Signature::MlDsa44,
     )
     .unwrap();
-    let to = kernel::crypto::address_to_string(&receiver.address);
-    mine(&binary, &db, &address);
+    let to = kernel::crypto::program_id_to_string(&receiver.program_id);
+    mine(&binary, &db, &program_id);
     let rpc = free();
     let p2p = free();
     let mut node = start(&binary, &db, &rpc, &p2p);
@@ -368,13 +412,16 @@ fn xpq_program_wallet_cli_spend_and_consolidation() {
         .unwrap()
         .to_string();
     drop(node);
-    mine(&binary, &db, &address);
+    mine(&binary, &db, &program_id);
     node = start(&binary, &db, &rpc, &p2p);
     let transaction = get(&rpc, &format!("/explorer/transaction/{hash}"));
     assert_eq!(transaction["transaction"]["program_id"], 0);
     assert_eq!(transaction["transaction"]["opcode"], 1);
     assert_eq!(transaction["transaction"]["type"], "transfer");
-    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{to}"))["total"],
+        100_000_000
+    );
     let output = cli(&file, &rpc, "consolidate", &[]);
     let hash = output
         .lines()
@@ -382,7 +429,7 @@ fn xpq_program_wallet_cli_spend_and_consolidation() {
         .unwrap()
         .to_string();
     drop(node);
-    mine(&binary, &db, &address);
+    mine(&binary, &db, &program_id);
     node = start(&binary, &db, &rpc, &p2p);
     let transaction = get(&rpc, &format!("/explorer/transaction/{hash}"));
     assert_eq!(transaction["transaction"]["program_id"], 0);
@@ -404,7 +451,10 @@ fn xpq_program_wallet_cli_spend_and_consolidation() {
     drop(node);
     node = start(&binary, &db, &rpc, &p2p);
     assert_eq!(get(&rpc, "/status")["tip_hash"], tip);
-    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{to}"))["total"],
+        100_000_000
+    );
     drop(node);
     fs::remove_dir_all(root).unwrap();
 }
@@ -435,10 +485,10 @@ fn counter_deploy_and_call_cli_survive_restart() {
             .unwrap();
     owner.mnemonic = Some(words);
     fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
-    let address = kernel::crypto::address_to_string(&owner.address);
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
     let code = root.join("counter.xpvm");
     fs::write(&code, include_bytes!("../../examples/counter/counter.xpvm")).unwrap();
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     let rpc = free();
     let p2p = free();
     let mut node = start(&node_binary, &db, &rpc, &p2p);
@@ -455,7 +505,7 @@ fn counter_deploy_and_call_cli_survive_restart() {
         .to_string();
     assert!(output.contains("Operation ID:"));
     drop(node);
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     node = start(&node_binary, &db, &rpc, &p2p);
     let offline = cli(
         &file,
@@ -473,11 +523,11 @@ fn counter_deploy_and_call_cli_survive_restart() {
             .unwrap()
             .to_string();
         drop(node);
-        mine(&node_binary, &db, &address);
+        mine(&node_binary, &db, &program_id);
         node = start(&node_binary, &db, &rpc, &p2p);
         let history = get(
             &rpc,
-            &format!("/explorer/address/{address}?include_emissions=false"),
+            &format!("/explorer/program/{program_id}?include_emissions=false"),
         );
         assert!(
             history.to_string().contains(&hash),
@@ -487,7 +537,7 @@ fn counter_deploy_and_call_cli_survive_restart() {
     let tip = get(&rpc, "/status")["tip_hash"].clone();
     let history = get(
         &rpc,
-        &format!("/explorer/address/{address}?include_emissions=false"),
+        &format!("/explorer/program/{program_id}?include_emissions=false"),
     );
     drop(node);
     node = start(&node_binary, &db, &rpc, &p2p);
@@ -495,7 +545,7 @@ fn counter_deploy_and_call_cli_survive_restart() {
     assert_eq!(
         get(
             &rpc,
-            &format!("/explorer/address/{address}?include_emissions=false")
+            &format!("/explorer/program/{program_id}?include_emissions=false")
         ),
         history
     );
@@ -529,14 +579,14 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
             .unwrap();
     owner.mnemonic = Some(words);
     fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
-    let address = kernel::crypto::address_to_string(&owner.address);
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
     let receiver = wallet::account_wallet_from_bip39_mnemonic(
         &wallet::encode_bip39_mnemonic(&[64; 16]).unwrap(),
         kernel::crypto::Signature::MlDsa44,
     )
     .unwrap();
-    let to = kernel::crypto::address_to_string(&receiver.address);
-    mine(&node_binary, &db, &address);
+    let to = kernel::crypto::program_id_to_string(&receiver.program_id);
+    mine(&node_binary, &db, &program_id);
     let rpc = free();
     let p2p = free();
     let mut node = start(&node_binary, &db, &rpc, &p2p);
@@ -559,7 +609,7 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
         .unwrap()
         .to_string();
     drop(node);
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     node = start(&node_binary, &db, &rpc, &p2p);
     // Deploy a contract that pays one coin and two asset units to the receiver.
     let mut code = b"XPVM".to_vec();
@@ -567,7 +617,7 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
     code.push(6);
     code.extend(
         borsh::to_vec(&kernel::program::vm::TransferRequest {
-            recipient: kernel::common::Owner::Address(receiver.address),
+            recipient: kernel::common::Owner::Program(receiver.program_id),
             amount: 100_000_000,
         })
         .unwrap(),
@@ -576,7 +626,7 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
     code.extend(hex::decode(&asset).unwrap());
     code.extend(
         borsh::to_vec(&kernel::program::vm::TransferRequest {
-            recipient: kernel::common::Owner::Address(receiver.address),
+            recipient: kernel::common::Owner::Program(receiver.program_id),
             amount: 200_000_000,
         })
         .unwrap(),
@@ -598,7 +648,7 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
         .unwrap()
         .to_string();
     drop(node);
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     node = start(&node_binary, &db, &rpc, &p2p);
     let recipient = format!("program:{contract}");
     for (command, args) in [
@@ -621,10 +671,13 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
     ] {
         cli(&file, &rpc, command, &args);
         drop(node);
-        mine(&node_binary, &db, &address);
+        mine(&node_binary, &db, &program_id);
         node = start(&node_binary, &db, &rpc, &p2p);
     }
-    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{to}"))["total"],
+        100_000_000
+    );
     assert_eq!(
         get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
         "200000000"
@@ -661,7 +714,10 @@ fn deployed_contract_receives_and_sends_coin_and_asset_through_cli() {
         get(&rpc, &format!("/program/account/{contract}")),
         contract_state
     );
-    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{to}"))["total"],
+        100_000_000
+    );
     assert_eq!(
         get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
         "200000000"
@@ -701,20 +757,20 @@ fn deployed_contract_registers_and_mints_asset_through_cli() {
             .unwrap();
     owner.mnemonic = Some(words);
     fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
-    let address = kernel::crypto::address_to_string(&owner.address);
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
     let receiver = wallet::account_wallet_from_bip39_mnemonic(
         &wallet::encode_bip39_mnemonic(&[66; 16]).unwrap(),
         kernel::crypto::Signature::MlDsa44,
     )
     .unwrap();
-    let to = kernel::crypto::address_to_string(&receiver.address);
+    let to = kernel::crypto::program_id_to_string(&receiver.program_id);
     let code_path = root.join("issuer.xpvm");
     let builder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/asset_issuer/build.py");
     let built = Command::new("python3")
         .arg(builder)
         .args([
             "--recipient-hex",
-            &hex::encode(receiver.address.0),
+            &hex::encode(receiver.program_id.0),
             "--name",
             "LAUNCH",
             "--max-supply-units",
@@ -733,7 +789,7 @@ fn deployed_contract_registers_and_mints_asset_through_cli() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     let rpc = free();
     let p2p = free();
     let mut node = start(&node_binary, &db, &rpc, &p2p);
@@ -763,13 +819,13 @@ fn deployed_contract_registers_and_mints_asset_through_cli() {
     .unwrap()
     .to_string();
     drop(node);
-    mine(&node_binary, &db, &address);
+    mine(&node_binary, &db, &program_id);
     node = start(&node_binary, &db, &rpc, &p2p);
     // No coin deposit: the signed caller payment covers registration, mint and fuel.
     for (nonce, supply) in [(1, "600000000"), (2, "1100000000")] {
         cli(&file, &rpc, "program-call", &["--program-id", &contract]);
         drop(node);
-        mine(&node_binary, &db, &address);
+        mine(&node_binary, &db, &program_id);
         node = start(&node_binary, &db, &rpc, &p2p);
         let record = get(&rpc, &format!("/program/asset/{asset}"));
         assert_eq!(record["supply"], supply);
@@ -788,7 +844,7 @@ fn deployed_contract_registers_and_mints_asset_through_cli() {
     }
     let record = get(&rpc, &format!("/program/asset/{asset}"));
     let account = get(&rpc, &format!("/program/account/{contract}"));
-    let payer = get(&rpc, &format!("/account/{address}"));
+    let payer = get(&rpc, &format!("/program/account/{program_id}"));
     let failed = Command::new(env!("CARGO_BIN_EXE_wallet"))
         .args([
             "program-call",
@@ -804,7 +860,7 @@ fn deployed_contract_registers_and_mints_asset_through_cli() {
     assert!(!failed.status.success());
     assert_eq!(get(&rpc, &format!("/program/asset/{asset}")), record);
     assert_eq!(get(&rpc, &format!("/program/account/{contract}")), account);
-    assert_eq!(get(&rpc, &format!("/account/{address}")), payer);
+    assert_eq!(get(&rpc, &format!("/program/account/{program_id}")), payer);
     drop(node);
     node = start(&node_binary, &db, &rpc, &p2p);
     assert_eq!(get(&rpc, &format!("/program/asset/{asset}")), record);
@@ -812,6 +868,165 @@ fn deployed_contract_registers_and_mints_asset_through_cli() {
     assert_eq!(
         get(&rpc, &format!("/program/asset/{asset}/balance/{to}"))["balance"],
         "1000000000"
+    );
+    drop(node);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires node binary and localhost sockets"]
+fn application_vm_deposit_and_dynamic_withdraw_survive_restart() {
+    let node_binary = Path::new(env!("CARGO_BIN_EXE_wallet")).with_file_name(if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    });
+    assert!(node_binary.exists(), "build node first");
+    let root = std::env::temp_dir().join(format!(
+        "xparq-app-vm-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("data");
+    let file = root.join("wallet.json");
+    let words = wallet::encode_bip39_mnemonic(&[75; 16]).unwrap();
+    let mut owner =
+        wallet::account_wallet_from_bip39_mnemonic(&words, kernel::crypto::Signature::MlDsa44)
+            .unwrap();
+    owner.mnemonic = Some(words);
+    fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
+    let program_id = kernel::crypto::program_id_to_string(&owner.program_id);
+    fn int(body: &mut Vec<u8>, n: u128) {
+        body.push(1);
+        body.extend(n.to_le_bytes());
+    }
+    fn end(body: &mut Vec<u8>) {
+        int(body, 0);
+        body.push(3);
+    }
+    // Test-only contract fixture: balances keyed by authenticated caller, not user input.
+    let mut body = vec![0x15, 0x36];
+    int(&mut body, 0);
+    body.extend([0x19, 0x21]);
+    let jump = body.len();
+    body.extend([0; 4]);
+    body.extend([0x12, 0x33, 0x16, 0x30, 0x29, 0x44, 0x02, 0x2a, 0x31]);
+    end(&mut body);
+    let withdrawal = body.len() as u32;
+    body[jump..jump + 4].copy_from_slice(&withdrawal.to_le_bytes());
+    body.extend([
+        0x12, 0x33, 0x16, 0x30, 0x29, 0x15, 0x29, 0x24, 0x2a, 0x31, 0x12, 0x15, 0x29, 0x40,
+    ]);
+    end(&mut body);
+    let mut code = b"XPVM".to_vec();
+    code.extend([4, 16, 0, 1, 0, 0, 0, 0, 0]);
+    code.extend(body);
+    let code_file = root.join("fixture.xpvm");
+    fs::write(&code_file, code).unwrap();
+    mine(&node_binary, &db, &program_id);
+    let rpc = free();
+    let p2p = free();
+    let mut node = start(&node_binary, &db, &rpc, &p2p);
+    let output = cli(
+        &file,
+        &rpc,
+        "program-deploy",
+        &["--code", code_file.to_str().unwrap(), "--nonce", "1"],
+    );
+    let id = output
+        .lines()
+        .find_map(|l| l.strip_prefix("Program ID: "))
+        .unwrap()
+        .to_string();
+    drop(node);
+    mine(&node_binary, &db, &program_id);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    // The offline deposit must be fully signed and quoted without mutating the chain.
+    let output = cli(
+        &file,
+        &rpc,
+        "program-call",
+        &["--program-id", &id, "--deposit", "0.00000100", "--offline"],
+    );
+    assert!(output.contains("Transaction Hex:"));
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{id}"))["coin_balance"],
+        0
+    );
+    cli(
+        &file,
+        &rpc,
+        "program-call",
+        &["--program-id", &id, "--deposit", "0.00000100"],
+    );
+    drop(node);
+    mine(&node_binary, &db, &program_id);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{id}"))["coin_balance"],
+        100
+    );
+    let key = hex::encode(
+        kernel::crypto::canonical_bytes(&kernel::common::Owner::Program(owner.program_id)).unwrap(),
+    );
+    let state_route = format!("/program/state/{id}/{key}");
+    assert_eq!(
+        get(&rpc, &state_route)["value"],
+        hex::encode(100u128.to_le_bytes())
+    );
+    let data = hex::encode(30u128.to_le_bytes());
+    cli(
+        &file,
+        &rpc,
+        "program-call",
+        &["--program-id", &id, "--data", &data],
+    );
+    drop(node);
+    mine(&node_binary, &db, &program_id);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{id}"))["coin_balance"],
+        70
+    );
+    assert_eq!(
+        get(&rpc, &state_route)["value"],
+        hex::encode(70u128.to_le_bytes())
+    );
+    let before = get(&rpc, "/status")["tip_hash"].clone();
+    let too_much = hex::encode(71u128.to_le_bytes());
+    let rejected = Command::new(env!("CARGO_BIN_EXE_wallet"))
+        .args([
+            "program-call",
+            "--wallet",
+            file.to_str().unwrap(),
+            "--rpc",
+            &rpc,
+            "--program-id",
+            &id,
+            "--data",
+            &too_much,
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(get(&rpc, "/status")["tip_hash"], before);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{id}"))["coin_balance"],
+        70
+    );
+    drop(node);
+    node = start(&node_binary, &db, &rpc, &p2p);
+    assert_eq!(
+        get(&rpc, &format!("/program/account/{id}"))["coin_balance"],
+        70
+    );
+    assert_eq!(
+        get(&rpc, &state_route)["value"],
+        hex::encode(70u128.to_le_bytes())
     );
     drop(node);
     fs::remove_dir_all(root).unwrap();

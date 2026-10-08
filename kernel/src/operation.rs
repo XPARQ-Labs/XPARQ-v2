@@ -84,13 +84,13 @@ mod tests {
         monetary::coin::{CoinOutput, CoinShare, Zeno},
         program::CoinTransition,
     };
-    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+    use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
     fn deploy_operation(code: Vec<u8>) -> BlockOperation {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x41; 32]));
 
         let public_key = seed.public_key();
-        let owner = address_from_public_key(&public_key).unwrap();
+        let owner = program_id_from_public_key(&public_key).unwrap();
 
         BlockOperation::DeployProgram(Box::new(AuthorizedDeployProgram {
             deploy: DeployProgram {

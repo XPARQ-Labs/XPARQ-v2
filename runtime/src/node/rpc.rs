@@ -157,16 +157,12 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             return Err("invalid quote authorization".into());
         }
         let mut vm_quote = kernel::program::vm_transfer::TransferQuote::default();
+        let mut vm_return_value = None;
         let vm_fuel = match kernel::program::system::script::execute::decode_program(&tx.call)
             .map_err(|e| format!("invalid program call: {e:?}"))?
         {
             kernel::program::system::script::execute::DecodedProgramCall::Vm(id) => {
-                let result = kernel::program::vm::execute_registered(
-                    &ledger.state().programs,
-                    kernel::program::ProgramId::from_bytes(id),
-                    kernel::program::vm::MAX_CALL_FUEL,
-                )
-                .map_err(|e| format!("VM quote failed: {e:?}"))?;
+                let _ = id;
                 let commitment = kernel::program::program_invocation_commitment(
                     tx.signer,
                     &tx.call,
@@ -174,14 +170,19 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     chain,
                 )
                 .map_err(|e| e.to_string())?;
-                vm_quote = kernel::program::vm_transfer::quote(
+                // Quotes authenticate ownership as well as signatures before exposing deposit context.
+                kernel::consensus::validate_coin_inputs_for_quote(&tx, ledger.state())
+                    .map_err(|e| e.to_string())?;
+                let result = kernel::program::vm_app::preview(
                     ledger.state(),
-                    kernel::program::ProgramId::from_bytes(id),
-                    &result,
+                    &tx,
+                    height,
                     commitment,
                     &extension::SystemApplications,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("VM quote failed: {e:?}"))?;
+                vm_quote = result.quote;
+                vm_return_value = Some(result.value.to_string());
                 result.fuel_used
             }
             _ => 0,
@@ -197,7 +198,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             stream,
             200,
             &serde_json::json!({
-                "created_state_weight":weight + vm_quote.created_state_weight, "vm_fuel":vm_fuel,
+                "created_state_weight":weight + vm_quote.created_state_weight, "vm_fuel":vm_fuel, "vm_return_value":vm_return_value,
                 "vm_created_coin_utxos":vm_quote.created_coin_utxos, "vm_consumed_coin_utxos":vm_quote.consumed_coin_utxos, "tip_hash": ledger.tip_hash().map(|h|hex::encode(h.0)),
             }),
         );
@@ -222,7 +223,16 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         load_or_initialize_header_snapshot(database)?;
 
     let response = match route {
-        "/status" => status_response(&ledger, cumulative_work, cumulative_weight)?,
+        "/status" => {
+            let mut response = status_response(&ledger, cumulative_work, cumulative_weight)?;
+            let minimums = super::chain_minimums::configured(database)?;
+            response["minimum_chain_work"] =
+                serde_json::json!(format_work(minimums.work.to_be_limbs()));
+            response["minimum_chain_weight"] = serde_json::json!(minimums.weight.to_string());
+            response["meets_chain_minimums"] =
+                serde_json::json!(minimums.allows(cumulative_work, cumulative_weight));
+            response
+        }
         "/fee-policy" => {
             let emission = expected_next_emission(&ledger)?;
             serde_json::json!({
@@ -256,20 +266,18 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 })),
             })
         }
-        route if route.starts_with("/program/account/") => {
-            program_account_response(&ledger, route)?
-        }
+        route if route.starts_with("/program/state/") => program_state_response(&ledger, route)?,
         route if route.starts_with("/program/asset/") => program_asset_response(&ledger, route)?,
 
-        route if route.starts_with("/balance/") => {
-            let address = route.trim_start_matches("/balance/");
-            if address.is_empty() || address.contains(['/', '?', '#']) {
+        route if route.starts_with("/program/balance/") => {
+            let program_id = route.trim_start_matches("/program/balance/");
+            if program_id.is_empty() || program_id.contains(['/', '?', '#']) {
                 return Err("invalid balance route".into());
             }
             balance_response(
                 &ledger,
                 &read_pending_operations(database)?,
-                parse_address(address)?,
+                parse_program_id(program_id)?,
             )?
         }
         route if route.starts_with("/block/") => {
@@ -283,10 +291,10 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 &canonical_block(database, &ledger, Height(height))?,
             )?
         }
-        route if route.starts_with("/account/") => {
-            let account_route = route.trim_start_matches("/account/");
-            let (address, query) = account_route.split_once('?').unwrap_or((account_route, ""));
-            if address.is_empty() || address.contains(['/', '#']) {
+        route if route.starts_with("/program/account/") => {
+            let account_route = route.trim_start_matches("/program/account/");
+            let (program_id, query) = account_route.split_once('?').unwrap_or((account_route, ""));
+            if program_id.is_empty() || program_id.contains(['/', '#']) {
                 return Err("invalid account route".into());
             }
             let mut utxo_offset = 0;
@@ -315,21 +323,21 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             account_response(
                 &ledger,
                 &read_pending_operations(database)?,
-                parse_address(address)?,
+                parse_program_id(program_id)?,
                 utxo_offset,
                 utxo_after,
             )?
         }
-        route if route.starts_with("/explorer/address/") => {
-            let value = route.trim_start_matches("/explorer/address/");
-            let (address, query) = value.split_once('?').unwrap_or((value, ""));
+        route if route.starts_with("/explorer/program/") => {
+            let value = route.trim_start_matches("/explorer/program/");
+            let (program_id, query) = value.split_once('?').unwrap_or((value, ""));
 
-            if address.is_empty() || address.contains(['/', '#']) {
-                return Err("invalid explorer address route".into());
+            if program_id.is_empty() || program_id.contains(['/', '#']) {
+                return Err("invalid explorer program route".into());
             }
 
             let mut include_emissions = true;
-            let mut limit = DEFAULT_ADDRESS_ACTIVITY_LIMIT;
+            let mut limit = DEFAULT_PROGRAM_ACTIVITY_LIMIT;
             let mut before = None;
 
             let mut seen_include_emissions = false;
@@ -340,7 +348,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 for parameter in query.split('&') {
                     let (name, value) = parameter
                         .split_once('=')
-                        .ok_or("invalid explorer address query")?;
+                        .ok_or("invalid explorer program query")?;
 
                     match name {
                         "include_emissions" => {
@@ -366,10 +374,10 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
 
                             limit = value
                                 .parse::<usize>()
-                                .map_err(|_| "invalid explorer address limit")?;
+                                .map_err(|_| "invalid explorer program limit")?;
 
-                            if limit == 0 || limit > MAX_ADDRESS_ACTIVITY_LIMIT {
-                                return Err("explorer address limit is out of range".into());
+                            if limit == 0 || limit > MAX_PROGRAM_ACTIVITY_LIMIT {
+                                return Err("explorer program limit is out of range".into());
                             }
                         }
 
@@ -380,30 +388,30 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
 
                             seen_before = true;
 
-                            if value.len() != crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE * 2 {
-                                return Err("invalid explorer address cursor".into());
+                            if value.len() != crate::storage::PROGRAM_ACTIVITY_CURSOR_SIZE * 2 {
+                                return Err("invalid explorer program cursor".into());
                             }
 
                             let bytes = hex::decode(value)
-                                .map_err(|_| "invalid explorer address cursor")?;
+                                .map_err(|_| "invalid explorer program cursor")?;
 
-                            let cursor: [u8; crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE] = bytes
+                            let cursor: [u8; crate::storage::PROGRAM_ACTIVITY_CURSOR_SIZE] = bytes
                                 .try_into()
-                                .map_err(|_| "invalid explorer address cursor")?;
+                                .map_err(|_| "invalid explorer program cursor")?;
 
                             before = Some(cursor);
                         }
 
-                        _ => return Err("invalid explorer address query".into()),
+                        _ => return Err("invalid explorer program query".into()),
                     }
                 }
             }
 
-            explorer_address_response(
+            explorer_program_response(
                 database,
                 &ledger,
                 &read_pending_operations(database)?,
-                parse_address(address)?,
+                parse_program_id(program_id)?,
                 include_emissions,
                 limit,
                 before,

@@ -18,7 +18,7 @@ block exploration, and bytecode deployment.
 The wallet file contains recovery and private signing material. It is checked
 for internal consistency when loaded, created atomically, and given owner-only
 permissions on Unix. Back up the mnemonic offline and never commit, upload, or
-share the wallet file. A miner needs only the public payout address. Keep plain
+share the wallet file. A miner needs only the public payout Program ID. Keep plain
 HTTP RPC on loopback or a trusted private network.
 
 ## XPQ transactions
@@ -28,11 +28,11 @@ Signed transactions are submitted automatically to `/transaction`. Use
 RPC is still needed when selecting inputs or calculating fees from node state.
 
 ```bash
-./target/release/wallet sign-spend --to ADDRESS --amount 1 --rpc 127.0.0.1:6666
+./target/release/wallet sign-spend --to PROGRAM_ID --amount 1 --rpc 127.0.0.1:6666
 ./target/release/wallet consolidate --wallet wallet.json --rpc 127.0.0.1:6666
 ```
 
-Without explicit inputs, the wallet selects available `/account/{address}`
+Without explicit inputs, the wallet selects available `/program/account/{program_id}`
 UTXOs and creates change. Consolidation merges the selected XPQ UTXOs into one
 self-owned output. Consensus validates it as an ordinary transaction, so its
 canonical bytes still incur archival burn and a miner fee.
@@ -40,6 +40,10 @@ canonical bytes still incur archival burn and a miner fee.
 The miner fee is node policy. The protocol burn separately covers canonical
 transaction history and positive net state growth. Consumed Coin UTXOs offset
 new Coin UTXOs for state growth but do not erase historical transaction bytes.
+The current burn tariff is 1 zeno per byte; the wallet's automatic miner fee is
+8 zeno per byte. These rates are calculated independently. Each net new Coin UTXO
+adds 57 bytes of state burn. An empty block with emission has 165 archival bytes,
+including three 32-byte header hashes, and one new 57-byte emission UTXO.
 
 ## Extension asset program
 
@@ -56,12 +60,12 @@ The examples below assume the `wallet` executable is on PATH; otherwise use
 
 ```sh
 wallet program-register --name Gold --max-supply 100 --initial-mint 40 --wallet wallet.json --rpc 127.0.0.1:6666
-wallet program-mint --asset CONTRACT --to ADDRESS --amount 20
-wallet program-transfer --asset CONTRACT --to ADDRESS --amount 15
+wallet program-mint --asset CONTRACT --to PROGRAM_ID --amount 20
+wallet program-transfer --asset CONTRACT --to PROGRAM_ID --amount 15
 wallet program-burn --asset CONTRACT --amount 5
 wallet program-consolidate --asset CONTRACT
 wallet program-info --asset CONTRACT
-wallet program-balance --asset CONTRACT --address ADDRESS
+wallet program-balance --asset CONTRACT --program-id PROGRAM_ID
 ```
 
 `--fixed-supply` disables further minting at registration. `--offline` prints
@@ -76,8 +80,8 @@ extension holdings and operations; asset-only recipients also receive history
 entries even when they receive no XPQ.
 
 RPC reads: `/program/asset/{asset}` and
-`/program/asset/{asset}/balance/{address}`. `/account` and `/balance` expose a
-separate `program_assets` array; `/explorer/address` contains aggregate balances
+`/program/asset/{asset}/balance/{program_id}`. `/program/account` and `/program/balance` expose a
+separate `program_assets` array; `/explorer/program` contains aggregate balances
 without share lists. `/explorer/transaction` decodes Program asset instructions.
 `POST /program/quote` reads a signed canonical Program transaction and returns
 extension state growth in bytes without admitting or applying the transaction.
@@ -123,7 +127,7 @@ mint, transfer, burn, consolidation, balances, recipient history and restart.
 ## Contract balances and funding
 
 `sign-spend`, `program-transfer`, and `program-mint` accept a deployed contract
-recipient as `--to program:PROGRAM_ID`. Addresses retain their usual syntax.
+recipient as `--to program:PROGRAM_ID`. All recipients use 64-character hex Program IDs.
 `program-account --program-id PROGRAM_ID` displays the contract's coin balance
 and live coin/asset shares. `program-call` executes its code and pays costs from
 the calling wallet. See [the fixed payout contract](../examples/vault/README.md)
@@ -133,3 +137,30 @@ for an example that receives and sends both values.
 XPVM v3 programs can also register and mint native assets with the deployed program
 as mint authority. `program-call` quotes and pays the resulting state growth and
 fuel from the caller's wallet. See the [asset issuer example](../examples/asset_issuer/README.md).
+
+
+XPVM v4 supports authenticated caller checks, bounded key/value state, branches,
+dynamic transfers and synchronous program calls. Use `program-call --program-id ID
+--data HEX` for application input, and optionally `--deposit XPQ_AMOUNT` to fund
+and execute a deposit atomically. Application code within the supported VM can be
+deployed without rebuilding the node. See [the v4 instruction contract](../docs/XPVM.md#application-bytecode-v4).
+
+## Program-owned accounts and unified monetary calls
+
+Wallet balances belong to a stateless system signature-policy instance derived
+from the signature scheme and public key. `wallet program-id` prints its 64-character
+hex representation (32 decoded bytes). Public keys are included in spending
+proofs, not ledger ownership. Coin and asset operations use monetary route 0.
+
+`GET /program/account/PROGRAM_ID` returns both wallet and deployed-program
+balances, paginated coin UTXOs, asset shares, and nullable scalar state. `GET
+/program/balance/PROGRAM_ID` returns available/reserved coin balance. History is
+`GET /explorer/program/PROGRAM_ID`. Asset balances accept a Program ID as their
+last path parameter. The old identity routes and `wallet address` command do not
+exist; Program IDs do not accept the old Base56 encoding.
+
+Wallet files store `program_id`, signature scheme, public key and recovery
+material. Old wallet files are not rewritten automatically; restore their mnemonic
+to a new file using the same signature scheme. Signing keys are unchanged, but
+the new domain-bound Program ID differs from the old identity. Chain-spec 6 and
+database schema 14 require a compatible database; no old-chain migration is included.

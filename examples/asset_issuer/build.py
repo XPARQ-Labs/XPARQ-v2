@@ -5,7 +5,7 @@ import pathlib
 import struct
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--recipient-hex', required=True, help='raw 32-byte account address payload')
+parser.add_argument('--recipient-hex', required=True, help='raw 32-byte Program ID')
 parser.add_argument('--name', required=True)
 parser.add_argument('--max-supply-units', type=int, required=True)
 parser.add_argument('--initial-mint-units', type=int, required=True, help='initial supply retained by contract')
@@ -37,7 +37,7 @@ code += b'\x08' + struct.pack('<I', len(name)) + name
 code += args.max_supply_units.to_bytes(16, 'little')
 code += args.initial_mint_units.to_bytes(16, 'little')
 code += struct.pack('<Q', args.asset_nonce) + b'\x01'  # skip_if_exists
-code += b'\x09\x01\x00' + recipient  # MintAssetTarget::Registered, Owner::Address
+code += b'\x09\x01\x00' + recipient  # MintAssetTarget::Registered, Owner::Program
 code += args.mint_units.to_bytes(16, 'little')
 code += b'\x01' + struct.pack('<q', 0) + b'\x03'
 pathlib.Path(args.output).write_bytes(code)

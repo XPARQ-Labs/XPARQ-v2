@@ -6,10 +6,10 @@ pub(super) fn print_utxo_tracker(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
-    let account = fetch_account(rpc, &address)?;
+    let program_id = kernel::crypto::program_id_to_string(&wallet_program_id_from_file_bytes(&bytes)?);
+    let account = fetch_account(rpc, &program_id)?;
 
-    println!("address: {address}");
+    println!("program_id: {program_id}");
     println!("next height: {}", account.next_height);
     println!("utxos: {}", account.utxos.len());
     let mut utxos = account.utxos.iter().collect::<Vec<_>>();

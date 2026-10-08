@@ -6,7 +6,7 @@ The project is organized around a small set of components:
 
 - `crypto` — cryptographic primitives and post-quantum signature support
 - `kernel` — consensus, ledger, transactions, native coin, and Program execution integration
-- `extension` — application layer for XPQ transfers and asset operations
+- `extension` — unified monetary application for coin and asset operations
 - `runtime` — node, P2P networking, synchronization, storage, mining, and RPC
 - `wallet` — local wallet and CLI
 - `docs` — protocol and RPC documentation
@@ -18,6 +18,24 @@ The project is organized around a small set of components:
 Build and dependency-check configuration is documented in
 [Tooling](docs/TOOLING.md). `Cargo.lock` is committed, and `build.sh` uses
 `--locked` to prevent dependency resolution changes during builds.
+
+## Program ownership
+
+Coins and assets use a single ownership type: `Owner::Program(ProgramId)`.
+A Program ID is 32 bytes, displayed as 64 hexadecimal characters. Wallets derive
+their ID from the signature policy, signature scheme and public key; public keys
+appear in spending proofs. Wallet accounts require no deployment or stored
+public-key record. Deployed contracts have their own Program IDs and can hold
+and transfer coins and assets through the VM.
+
+Programs enforce application permissions. The kernel checks the authenticated
+owner, balances, asset authority, supply, fees and protocol burn, and rolls back
+failed execution atomically. A registered contract must execute its code to
+spend its funds. See [ownership](docs/OWNERSHIP.md).
+
+Developers can deploy applications using the existing [XPVM](docs/XPVM.md)
+instructions without rebuilding the node. Changes to VM instructions, compiled
+system applications or consensus rules still require a node update.
 
 ## Requirements
 
@@ -175,7 +193,7 @@ remote clients use `http://[PUBLIC_IPV6]:6666` or
 
 ## Run a mining node
 
-Mining requires an XPARQ address.
+Mining requires a recipient Program ID.
 
 First create a wallet:
 
@@ -189,20 +207,21 @@ Or open the interactive wallet:
 ./target/release/wallet
 ```
 
-The wallet will display an address after creation.
+The wallet displays its 64-character hexadecimal Program ID after creation.
+Use that ID as the mining recipient.
 
 Start the node with mining enabled:
 
 ```bash
 ./target/release/node run \
-  --miner <XPARQ_ADDRESS>
+  --miner <PROGRAM_ID>
 ```
 
 Example:
 
 ```bash
 ./target/release/node run \
-  --miner YOUR_XPARQ_ADDRESS
+  --miner YOUR_PROGRAM_ID
 ```
 
 You can combine mining with peers:
@@ -210,7 +229,7 @@ You can combine mining with peers:
 ```bash
 ./target/release/node run \
   --peer xparqnode.duckdns.org:6677 \
-  --miner <XPARQ_ADDRESS>
+  --miner <PROGRAM_ID>
 ```
 
 When mining is active, the node prints:
@@ -219,7 +238,7 @@ When mining is active, the node prints:
 mining: enabled on the local canonical tip
 ```
 
-Mining rewards are assigned to the address supplied through `--miner`.
+Mining rewards belong to the program supplied through `--miner`.
 
 Interactive terminals show mined blocks in a table with `height`, `weight`,
 `subsidy`, `state_burn`, `tx_count` and `difficulty`. Each mined block replaces
@@ -342,8 +361,26 @@ curl -s http://127.0.0.1:6666/block/0 | jq
 Query a balance:
 
 ```bash
-curl -s "http://127.0.0.1:6666/balance/<XPARQ_ADDRESS>" | jq
+curl -s "http://127.0.0.1:6666/program/balance/<PROGRAM_ID>" | jq
 ```
+
+Query account UTXOs and asset holdings:
+
+```bash
+curl -s "http://127.0.0.1:6666/program/account/<PROGRAM_ID>" | jq
+```
+
+The account response is paginated; use the returned pagination fields to fetch
+additional UTXOs. Other program queries include:
+
+| Endpoint | Data |
+| --- | --- |
+| `/explorer/program/{program_id}` | Paginated transaction activity |
+| `/program/asset/{asset}/balance/{program_id}` | Asset balance and shares |
+| `/program/state/{program_id}/{key}` | Deployed program storage; key encoded as hex |
+
+The former `/account/`, `/balance/` and `/explorer/address/` routes have been
+removed. Use the program routes above.
 
 ### RPC documentation
 
@@ -373,7 +410,7 @@ The current interactive menu includes:
 XPARQ Wallet
 1. Create Wallet
 2. Import Wallet
-3. Show Address
+3. Show Program ID
 4. Show Balance
 5. Transaction History
 6. UTXO
@@ -433,12 +470,31 @@ Example:
 > [!IMPORTANT]
 > Back up the mnemonic shown during wallet creation. Anyone with access to the mnemonic may be able to control the wallet.
 
-### Show wallet address
+### Show wallet Program ID
 
 ```bash
-./target/release/wallet address \
+./target/release/wallet program-id \
   --wallet wallet.json
 ```
+
+This command replaces `wallet address`. Transfer recipients use the same
+64-character Program ID in `--to`; `program:<PROGRAM_ID>` is also accepted.
+
+### Restore a wallet
+
+Restore the mnemonic with the original signature scheme into a new wallet file:
+
+```bash
+./target/release/wallet restore \
+  --mnemonic "YOUR MNEMONIC PHRASE" \
+  --account mldsa44 \
+  --wallet restored-wallet.json
+```
+
+Current wallet files store `program_id`. Older files containing `address` are
+not converted automatically. Restoring preserves the signing keys, but derives
+a new Program ID under the current policy domain. It does not migrate funds
+from an older chain.
 
 ### Show balance
 
@@ -671,6 +727,38 @@ representation when decoding and chain/schema checks succeed; version 2 is not
 accepted. A snapshot must match chain identity, checksum and canonical state.
 The canonical block log remains required for startup and reorganization.
 
+### Minimum remote chain work and weight
+
+`node run` accepts local sync-admission floors:
+
+```bash
+./target/release/node run --data ./data/mainnet --minimum-chain-work HEX_WORK --minimum-chain-weight DECIMAL_WEIGHT
+```
+
+A candidate must have cumulative work **at least** the work floor and cumulative
+weight **at least** the weight floor. Work accepts 1–128 big-endian hexadecimal
+digits (up to 512 bits), with an optional `0x` prefix. Weight is an unsigned
+64-bit decimal integer. Copy these formats from the `cumulative_work` and
+`cumulative_weight` fields of a trusted node's `GET /status` response. Both default
+to zero; configure the same options again after restarting.
+
+TCP header sync, gossip/reverse sync and litep2p tip discovery skip below-floor
+claims before requesting headers or bodies. Passing that cheap filter is not proof:
+header PoW and advertised totals still have to match, and validated candidates are
+checked before branch commit or recovery. Unannounced relay blocks are subject to
+the same floors. Peers below the floor can still request our chain for bootstrap.
+Once eligible, fork choice remains work first, then weight, then tip hash.
+
+`GET /status` also returns `minimum_chain_work`, `minimum_chain_weight` and
+`meets_chain_minimums`. A fresh local genesis or existing shorter ledger is still
+allowed to start and serve RPC; the floors govern remote-chain admission, not
+local validity or mining. Setting a floor above all available valid peers leaves
+the node waiting for a chain that reaches it.
+
+This is local policy and does not change chain identity or the wire protocol.
+It does not skip PoW validation during local startup or speed up replay of an
+existing database.
+
 ### Inspect mempool
 
 ```bash
@@ -680,26 +768,43 @@ The canonical block log remains required for startup and reorganization.
 ### Inspect an account
 
 ```bash
-./target/release/node account \
+./target/release/node program-account \
   ./data/mainnet \
-  <XPARQ_ADDRESS>
+  <PROGRAM_ID>
 ```
 
 ## Useful development commands
 
+Validation and synchronization reuse the PoW working buffer across a batch and
+append committed blocks without cloning the full chain history. Block execution
+reuses one private state across its transactions; asset operations and quotes
+use the touched entries instead of copying entire asset tables. See
+[CPU measurements and remaining costs](docs/CPU_VALIDATION.md) for the benchmark
+command and its limits.
+
 ### Coin spends and Program assets
 
 The kernel owns native XPQ and asset types, checked monetary state, and UTXOs.
-XPQ transfers execute in the extension application through a restricted kernel
-coin host; spend data cannot mutate
-the ledger directly. Wallet spends and consolidation use XPQ Program 0, method 1.
-Assets live in kernel-owned Program state
-and use the wallet `program-*` commands. The `extension` crate depends on
-`kernel` and implements the applications on its restricted host interfaces.
-Runtime installs `extension::SystemApplications` for validation and execution;
-kernel owns authorization, monetary checks, state roots and rollback. One Program signature binds the asset
-operation and its XPQ payment. Legacy asset transactions, combined spends and
-`asset-*` commands have been removed.
+Coin and asset operations execute in `extension::monetary` through restricted
+kernel hosts. Wallets use system dispatcher route `0`, which is separate from
+the 32-byte Program ID identifying an owner.
+
+| Operation | Opcode | Scope |
+| --- | --- | --- |
+| Transfer | `1` | Coin or asset |
+| CreateAsset | `2` | Register an asset with its authority and policy |
+| Mint | `3` | Asset minting subject to its authority and supply rules |
+| Burn | `4` | Asset burn; voluntary coin burn is disabled |
+
+Transfer and Burn encode the currency selector (`0` for coin, `1` for asset).
+Native coin issuance remains governed by consensus. Mandatory protocol burn
+is enforced separately from the Burn operation.
+
+Assets live in kernel-owned Program state and use the wallet `program-*`
+commands. Runtime installs `extension::SystemApplications` for validation and
+execution. One Program signature binds the asset operation and its XPQ payment.
+Legacy asset transactions, combined spends and `asset-*` commands have been
+removed.
 
 See [architecture](docs/ARCHITECTURE.md) for source ownership and the distinction
 between extension applications and deployed [XPVM programs](docs/XPVM.md).
@@ -708,18 +813,18 @@ The [VM roadmap](ROADMAP.md) records implementation and open verification gates.
 See [ProgramCall integration](docs/PROGRAM_CALL.md) for registration, mint,
 transfer, burn and consolidation instructions.
 
-All XPQ Program calls carry `CoinTransition` with `CoinCharges { miner_fee }`.
-The miner fee is
-credited to the block miner as a separate UTXO; it is no longer encoded as a
-normal coin output. The protocol burn remains the verified difference between
-XPQ inputs, address outputs, and the miner fee. This changes transaction bytes
-and derived output IDs. Start upgraded nodes with fresh chain storage after the
-planned chain reset.
-Coin outputs encode the recipient address directly; the obsolete block-miner
-recipient tag is no longer part of a spend output.
+All monetary Program calls carry `CoinTransition` with `CoinCharges { miner_fee }`.
+The miner fee is credited to the block miner as a separate UTXO. Protocol burn
+is the verified difference between XPQ inputs, program-owned outputs and the
+miner fee. Coin outputs encode the recipient Program ID.
 
-The reset baseline uses chain spec version 1 and storage schema 10. Start with
-fresh compatible storage; old assets and transactions are not migrated.
+### Protocol and storage compatibility
+
+The current protocol uses **chain-spec version 6** and **database schema 14**.
+Older databases are incompatible; no automatic migration of ledger state,
+assets or transactions is provided. Use fresh storage for the current chain,
+keeping older databases separate. See [Program ID compatibility](docs/OWNERSHIP.md#compatibility)
+for wallet identity changes.
 
 Check the complete workspace:
 

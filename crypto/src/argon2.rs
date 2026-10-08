@@ -6,6 +6,10 @@ pub struct PoWMemory {
 }
 
 impl PoWMemory {
+    pub fn memory_kib(&self) -> usize {
+        self.blocks.len()
+    }
+
     pub fn new(memory_kib: u32) -> Self {
         Self {
             blocks: vec![::argon2::Block::default(); memory_kib as usize],

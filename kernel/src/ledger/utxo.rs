@@ -101,7 +101,7 @@ mod invariant_tests {
 
     fn coin(amount: u64) -> CoinUtxo {
         CoinUtxo {
-            owner: Owner::Address(crypto::Address([1; crypto::ADDRESS_SIZE])),
+            owner: Owner::Program(crypto::ProgramId([1; crypto::PROGRAM_ID_SIZE])),
             amount: Zeno::from_zeno(amount),
         }
     }

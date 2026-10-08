@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, error::Error as StdError, fmt};
 
 use crate::common::Owner;
-use crypto::{Address, canonical_bytes};
+use crypto::{ProgramId, canonical_bytes};
 
 use crate::{
     common::ChainContext,
@@ -80,19 +80,8 @@ pub fn validate_program_call_with_applications(
         .map_err(|_| ProgramConsensusError::Intent(IntentError::InvalidAssetCall))?
     {
         crate::program::system::script::execute::DecodedProgramCall::Vm(id) => {
-            let registry = state
-                .registry()
-                .ok_or(ProgramConsensusError::UnknownProgram)?;
-            let result = crate::program::vm::execute_registered(
-                registry,
-                crate::program::ProgramId::from_bytes(id),
-                crate::program::vm::MAX_CALL_FUEL,
-            )
-            .map_err(ProgramConsensusError::Vm)?;
-            if result.has_monetary_effects() {
-                let ledger = state
-                    .ledger_state()
-                    .ok_or(ProgramConsensusError::UnknownProgram)?;
+            validate_coin_inputs_for_quote(&transaction, state)?;
+            if let Some(ledger) = state.ledger_state() {
                 let commitment = crate::program::program_invocation_commitment(
                     transaction.signer,
                     &transaction.call,
@@ -100,46 +89,45 @@ pub fn validate_program_call_with_applications(
                     chain,
                 )
                 .map_err(ProgramConsensusError::Intent)?;
-                vm_quote = crate::program::vm_transfer::quote(
+                let result = crate::program::vm_app::preview(
                     ledger,
-                    crate::program::ProgramId::from_bytes(id),
-                    &result,
+                    &transaction,
+                    current_height,
                     commitment,
                     applications,
                 )
-                .map_err(|_| ProgramConsensusError::Intent(IntentError::InvalidAssetCall))?;
+                .map_err(ProgramConsensusError::Vm)?;
+                vm_quote = result.quote;
+                result.fuel_used
+            } else {
+                let registry = state
+                    .registry()
+                    .ok_or(ProgramConsensusError::UnknownProgram)?;
+                let result = crate::program::vm::execute_registered(
+                    registry,
+                    crate::program::ProgramId::from_bytes(id),
+                    crate::program::vm::MAX_CALL_FUEL,
+                )
+                .map_err(ProgramConsensusError::Vm)?;
+                if result.has_monetary_effects() {
+                    return Err(ProgramConsensusError::UnknownProgram);
+                }
+                result.fuel_used
             }
-            result.fuel_used
         }
         crate::program::system::script::execute::DecodedProgramCall::Asset(call) => {
-            use crate::program::system::asset_program::type_::AssetCall;
-            let recipients = match &call {
-                AssetCall::Register(call) => vec![call.mint_authority],
-                AssetCall::Mint(call) => vec![call.recipient],
-                AssetCall::Transfer(call) => {
-                    call.outputs.iter().map(|output| output.recipient).collect()
-                }
-                AssetCall::Burn(_) => Vec::new(),
-            };
-            for recipient in recipients {
-                if let Owner::Program(id) = recipient {
-                    if state
-                        .registry()
-                        .and_then(|registry| registry.program(&id))
-                        .is_none()
-                    {
-                        return Err(ProgramConsensusError::UnknownProgram);
-                    }
-                }
-            }
+            let _ = call;
             0
         }
         _ => 0,
     };
-    let created_state_weight = if transaction.call.program
-        == crate::program::system::script::call::SystemProgramId::XPQ
-        || transaction.call.program == crate::program::system::script::call::SystemProgramId::VM
-    {
+    let created_state_weight = if matches!(
+        crate::program::system::script::execute::decode_program(&transaction.call),
+        Ok(
+            crate::program::system::script::execute::DecodedProgramCall::XpqTransfer
+                | crate::program::system::script::execute::DecodedProgramCall::Vm(_)
+        )
+    ) {
         vm_quote.created_state_weight
     } else {
         let extensions = state
@@ -185,32 +173,49 @@ pub(crate) fn count_coin_outputs(
         .ok_or(ProgramConsensusError::Burn(BurnError::WeightOverflow))
 }
 
+/// Ownership/conservation validation for a signed read-only quote; exact burn is computed afterwards.
+pub fn validate_coin_inputs_for_quote(
+    tx: &AuthorizedProgramInvocation,
+    state: &impl ProgramStateView,
+) -> Result<(), ProgramConsensusError> {
+    tx.validate_structure()
+        .map_err(ProgramConsensusError::Intent)?;
+    let (inputs, outputs) = tx
+        .payment
+        .coin_parts()
+        .ok_or(ProgramConsensusError::Intent(IntentError::InvalidAssetCall))?;
+    validate_coin_inputs(
+        inputs,
+        outputs,
+        tx.payment.charges.miner_fee,
+        tx.signer,
+        state,
+    )
+    .map(|_| ())
+}
+
 pub(crate) fn validate_coin_inputs(
     inputs: &[CoinShare],
     outputs: &[CoinOutput],
     miner_fee: Zeno,
-    signer: Address,
+    signer: ProgramId,
     state: &impl ProgramStateView,
 ) -> Result<Zeno, ProgramConsensusError> {
     ensure_unique_coin_ids(inputs.iter().copied())?;
-    for output in outputs {
-        if let Owner::Program(id) = output.output {
-            if state
-                .registry()
-                .and_then(|registry| registry.program(&id))
-                .is_none()
-            {
-                return Err(ProgramConsensusError::UnknownProgram);
-            }
-        }
+    // A registered contract must execute its own policy; a matching key proof
+    // must never turn it into an implicit signature-policy account.
+    if state
+        .registry()
+        .is_some_and(|r| r.contains(&(signer)))
+    {
+        return Err(ProgramConsensusError::InvalidAuthorization);
     }
-
     let mut input_total = Zeno::ZERO;
 
     for id in inputs {
         let input = state.coin(*id).ok_or(ProgramConsensusError::UtxoNotFound)?;
 
-        if input.owner != Owner::Address(signer) {
+        if input.owner != Owner::Program(signer) {
             return Err(ProgramConsensusError::RecipientMismatch);
         }
 
@@ -301,7 +306,7 @@ mod p3e_authorization_gate_tests {
     use super::*;
 
     use crypto::{
-        AccountSignatureScheme, HASH_SIZE, HASH16_SIZE, SigningSeed, address_from_public_key,
+        AccountSignatureScheme, HASH_SIZE, HASH16_SIZE, SigningSeed, program_id_from_public_key,
     };
 
     use crate::{
@@ -318,8 +323,8 @@ mod p3e_authorization_gate_tests {
         SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([tag; 32]))
     }
 
-    fn signer(seed: &SigningSeed) -> Address {
-        address_from_public_key(&seed.public_key()).unwrap()
+    fn signer(seed: &SigningSeed) -> ProgramId {
+        program_id_from_public_key(&seed.public_key()).unwrap()
     }
 
     fn chain(tag: u8) -> ChainContext {
@@ -342,7 +347,7 @@ mod p3e_authorization_gate_tests {
         signer_seed: &SigningSeed,
         chain: ChainContext,
     ) -> AuthorizedProgramInvocation {
-        let signer = crypto::address_from_public_key(&signer_seed.public_key()).unwrap();
+        let signer = crypto::program_id_from_public_key(&signer_seed.public_key()).unwrap();
         let call = crate::program::system::coin_program::transfer_call();
         let commitment = program_invocation_commitment(signer, &call, &intent, chain).unwrap();
         AuthorizedProgramInvocation {
@@ -391,7 +396,7 @@ mod p3e_authorization_gate_tests {
         let input_amount = Zeno::from_zeno(1_000_000);
         struct VmState {
             registry: ProgramRegistry,
-            signer: Address,
+            signer: ProgramId,
             input: CoinShare,
             input_amount: Zeno,
         }
@@ -402,7 +407,7 @@ mod p3e_authorization_gate_tests {
             fn coin(&self, id: CoinShare) -> Option<CoinInputState> {
                 (id == self.input).then_some(CoinInputState {
                     amount: self.input_amount,
-                    owner: crate::common::Owner::Address(self.signer),
+                    owner: crate::common::Owner::Program(self.signer),
                 })
             }
         }

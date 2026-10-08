@@ -20,15 +20,15 @@ pub(super) fn deploy_program(args: &[String]) -> Result<(), String> {
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let deploy = DeployProgram {
-        owner: wallet.address(),
+        owner: wallet.program_id(),
         nonce,
         code: code.into(),
     };
     deploy
         .validate_structure()
         .map_err(|e| format!("invalid XPVM program: {e:?}"))?;
-    let address = kernel::crypto::address_to_string(&wallet.address());
-    let account = fetch_account(rpc, &address)?;
+    let program_id = kernel::crypto::program_id_to_string(&wallet.program_id());
+    let account = fetch_account(rpc, &program_id)?;
     let mut candidates = account
         .utxos
         .into_iter()
@@ -54,6 +54,7 @@ pub(super) fn deploy_program(args: &[String]) -> Result<(), String> {
         if let Some((signed, quote, burn, fee)) =
             quote_selected(rpc, &wallet, &deploy, &inputs, total)?
         {
+            drop(wallet);
             let bytes = canonical_bytes(&signed).map_err(|e| e.to_string())?;
             let operation = BlockOperation::DeployProgram(Box::new(signed));
             println!(
@@ -98,10 +99,10 @@ fn quote_selected(
         let outputs = if change == 0 {
             vec![]
         } else {
-            vec![CoinOutput::new(wallet.address(), Zeno::from_zeno(change))]
+            vec![CoinOutput::new(wallet.program_id(), Zeno::from_zeno(change))]
         };
         let payment = CoinTransition::coin_with_charges(
-            wallet.address(),
+            wallet.program_id(),
             inputs.to_vec(),
             outputs,
             CoinCharges::new(Zeno::from_zeno(fee)),
@@ -164,14 +165,14 @@ mod tests {
         code.extend_from_slice(&7i64.to_le_bytes());
         code.push(3);
         let program = DeployProgram {
-            owner: wallet.address,
+            owner: wallet.program_id,
             nonce: 1,
             code: code.into(),
         };
         let payment = CoinTransition::coin_with_charges(
-            wallet.address,
+            wallet.program_id,
             vec![CoinShare::from_bytes([3; kernel::crypto::HASH16_SIZE])],
-            vec![CoinOutput::new(wallet.address, Zeno::from_zeno(90))],
+            vec![CoinOutput::new(wallet.program_id, Zeno::from_zeno(90))],
             CoinCharges::new(Zeno::from_zeno(10)),
         )
         .unwrap();
@@ -181,14 +182,14 @@ mod tests {
         assert!(
             signed
                 .authorization
-                .verify_commitment(wallet.address, &commitment, 1)
+                .verify_commitment(wallet.program_id, &commitment, 1)
         );
         signed.deploy.nonce += 1;
         let changed = signed.commitment(chain).unwrap();
         assert!(
             !signed
                 .authorization
-                .verify_commitment(wallet.address, &changed, 1)
+                .verify_commitment(wallet.program_id, &changed, 1)
         );
     }
 }

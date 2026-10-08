@@ -17,7 +17,7 @@ const DATABASE_FILE: &str = "xparq.redb";
 
 // Reset-chain schema stores coin-only UTXOs and Program extension state/journals.
 // Tagged CoinOutput recipients require a fresh database; old bytes are incompatible.
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 14;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");
@@ -33,10 +33,10 @@ const TX_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("transactio
 const INDEX_TIP_HEIGHT_KEY: &str = "canonical_index_tip_height";
 const INDEX_TIP_HASH_KEY: &str = "canonical_index_tip_hash";
 
-const ADDRESS_ACTIVITY_INDEX: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("address_activity_index");
+const PROGRAM_ACTIVITY_INDEX: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("program_activity_index");
 const COIN_ORIGIN_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("coin_origin_index");
-const ADDRESS_PROGRAM_INDEX_VERSION_KEY: &str = "address_program_index_version";
+const PROGRAM_PROGRAM_INDEX_VERSION_KEY: &str = "program_id_program_index_version";
 const COIN_ORIGIN_INDEX_VERSION_KEY: &str = "coin_origin_index_version";
 
 /// Rebuildable canonical-chain metadata, separate from consensus UTXO state.
@@ -47,19 +47,19 @@ pub struct CoinOrigin {
     pub created_in: Height,
 }
 
-pub const ADDRESS_ACTIVITY_CURSOR_SIZE: usize = 8 + 1 + 8;
+pub const PROGRAM_ACTIVITY_CURSOR_SIZE: usize = 8 + 1 + 8;
 
 #[derive(Debug)]
-pub struct AddressActivityPage {
+pub struct ProgramActivityPage {
     pub entries: Vec<(u64, Option<u64>)>,
-    pub next_cursor: Option<[u8; ADDRESS_ACTIVITY_CURSOR_SIZE]>,
+    pub next_cursor: Option<[u8; PROGRAM_ACTIVITY_CURSOR_SIZE]>,
 }
 
 const EMPTY_INDEX_VALUE: &[u8] = &[];
 
 #[derive(Debug, Clone, Copy)]
-pub struct StoredAddressActivity {
-    pub address: [u8; kernel::crypto::ADDRESS_SIZE],
+pub struct StoredProgramActivity {
+    pub program_id: [u8; kernel::crypto::PROGRAM_ID_SIZE],
     pub transaction_index: Option<u64>,
 }
 
@@ -69,7 +69,7 @@ pub struct StoredCanonicalBlock {
     pub hash: [u8; 32],
     pub bytes: Vec<u8>,
     pub transactions: Vec<[u8; 32]>,
-    pub activities: Vec<StoredAddressActivity>,
+    pub activities: Vec<StoredProgramActivity>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,37 +78,37 @@ pub struct CanonicalIndexBlock {
     pub hash: [u8; 32],
     pub bytes: Vec<u8>,
     pub transactions: Vec<[u8; 32]>,
-    pub activities: Vec<StoredAddressActivity>,
+    pub activities: Vec<StoredProgramActivity>,
 }
 
-pub fn read_address_activities_page(
+pub fn read_program_activities_page(
     directory: &Path,
-    address: [u8; kernel::crypto::ADDRESS_SIZE],
-    before: Option<[u8; ADDRESS_ACTIVITY_CURSOR_SIZE]>,
+    program_id: [u8; kernel::crypto::PROGRAM_ID_SIZE],
+    before: Option<[u8; PROGRAM_ACTIVITY_CURSOR_SIZE]>,
     limit: usize,
-) -> Result<AddressActivityPage, String> {
+) -> Result<ProgramActivityPage, String> {
     if limit == 0 {
-        return Err("address activity page limit must be greater than zero".into());
+        return Err("program_id activity page limit must be greater than zero".into());
     }
 
     let database = open(directory)?;
 
     let transaction = database
         .begin_read()
-        .map_err(|error| format!("begin address activity page read: {error}"))?;
+        .map_err(|error| format!("begin program_id activity page read: {error}"))?;
 
     let table = transaction
-        .open_table(ADDRESS_ACTIVITY_INDEX)
-        .map_err(|error| format!("open address activity index table: {error}"))?;
+        .open_table(PROGRAM_ACTIVITY_INDEX)
+        .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
-    let key_size = kernel::crypto::ADDRESS_SIZE + ADDRESS_ACTIVITY_CURSOR_SIZE;
+    let key_size = kernel::crypto::PROGRAM_ID_SIZE + PROGRAM_ACTIVITY_CURSOR_SIZE;
 
     let mut start = Vec::with_capacity(key_size);
-    start.extend_from_slice(&address);
+    start.extend_from_slice(&program_id);
     start.resize(key_size, 0x00);
 
     let mut end = Vec::with_capacity(key_size);
-    end.extend_from_slice(&address);
+    end.extend_from_slice(&program_id);
 
     match before {
         Some(cursor) => {
@@ -120,7 +120,7 @@ pub fn read_address_activities_page(
         }
     }
 
-    let height_start = kernel::crypto::ADDRESS_SIZE;
+    let height_start = kernel::crypto::PROGRAM_ID_SIZE;
     let height_end = height_start + 8;
     let kind_index = height_end;
     let transaction_start = kind_index + 1;
@@ -130,25 +130,25 @@ pub fn read_address_activities_page(
 
     let entries = table
         .range(start.as_slice()..=end.as_slice())
-        .map_err(|error| format!("range address activity page: {error}"))?;
+        .map_err(|error| format!("range program_id activity page: {error}"))?;
 
     for entry in entries.rev() {
         let (key, _) =
-            entry.map_err(|error| format!("read address activity page entry: {error}"))?;
+            entry.map_err(|error| format!("read program_id activity page entry: {error}"))?;
 
         let key = key.value();
 
         if key.len() != key_size {
-            return Err("stored address activity key has invalid length".into());
+            return Err("stored program_id activity key has invalid length".into());
         }
 
-        if key[..kernel::crypto::ADDRESS_SIZE] != address {
-            return Err("stored address activity key has invalid address prefix".into());
+        if key[..kernel::crypto::PROGRAM_ID_SIZE] != program_id {
+            return Err("stored program_id activity key has invalid program_id prefix".into());
         }
 
-        let cursor: [u8; ADDRESS_ACTIVITY_CURSOR_SIZE] = key[kernel::crypto::ADDRESS_SIZE..]
+        let cursor: [u8; PROGRAM_ACTIVITY_CURSOR_SIZE] = key[kernel::crypto::PROGRAM_ID_SIZE..]
             .try_into()
-            .map_err(|_| "stored address activity cursor is invalid")?;
+            .map_err(|_| "stored program_id activity cursor is invalid")?;
 
         // `before` is exclusive. The previous page's final entry
         // must not appear again.
@@ -159,7 +159,7 @@ pub fn read_address_activities_page(
         let height = u64::from_be_bytes(
             key[height_start..height_end]
                 .try_into()
-                .map_err(|_| "stored address activity height is invalid")?,
+                .map_err(|_| "stored program_id activity height is invalid")?,
         );
 
         let transaction_index = match key[kind_index] {
@@ -168,11 +168,11 @@ pub fn read_address_activities_page(
             1 => Some(u64::from_be_bytes(
                 key[transaction_start..transaction_end]
                     .try_into()
-                    .map_err(|_| "stored address activity transaction index is invalid")?,
+                    .map_err(|_| "stored program_id activity transaction index is invalid")?,
             )),
 
             _ => {
-                return Err("stored address activity kind is invalid".into());
+                return Err("stored program_id activity kind is invalid".into());
             }
         };
 
@@ -197,20 +197,20 @@ pub fn read_address_activities_page(
 
     let entries = selected.into_iter().map(|(entry, _)| entry).collect();
 
-    Ok(AddressActivityPage {
+    Ok(ProgramActivityPage {
         entries,
         next_cursor,
     })
 }
 
-fn encode_address_activity_key(
-    address: [u8; kernel::crypto::ADDRESS_SIZE],
+fn encode_program_activity_key(
+    program_id: [u8; kernel::crypto::PROGRAM_ID_SIZE],
     height: u64,
     transaction_index: Option<u64>,
 ) -> Vec<u8> {
-    let mut key = Vec::with_capacity(kernel::crypto::ADDRESS_SIZE + 8 + 1 + 8);
+    let mut key = Vec::with_capacity(kernel::crypto::PROGRAM_ID_SIZE + 8 + 1 + 8);
 
-    key.extend_from_slice(&address);
+    key.extend_from_slice(&program_id);
     key.extend_from_slice(&height.to_be_bytes());
 
     match transaction_index {
@@ -271,8 +271,8 @@ pub fn canonical_index_tip(directory: &Path) -> Result<Option<(u64, [u8; 32])>, 
         .map(|value| value.value().to_vec());
 
     let program_version = metadata
-        .get(ADDRESS_PROGRAM_INDEX_VERSION_KEY)
-        .map_err(|e| format!("read program address index version: {e}"))?
+        .get(PROGRAM_PROGRAM_INDEX_VERSION_KEY)
+        .map_err(|e| format!("read program program_id index version: {e}"))?
         .map(|v| v.value().to_vec());
     if program_version.as_deref() != Some(&[1_u8][..])
         || origin_version.as_deref() != Some(&[1_u8][..])
@@ -481,7 +481,7 @@ mod coin_origin_tests {
     use kernel::{
         blockchain::{Block, Emission, GENESIS_TARGET_BITS},
         common::Nonce,
-        crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key},
+        crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key},
         monetary::coin::{CoinOutput, Zeno},
         program::{
             AccountAuthorization, AuthorizedProgramInvocation, CoinTransition,
@@ -492,7 +492,7 @@ mod coin_origin_tests {
     #[test]
     fn transaction_outputs_and_miner_fee_point_to_program_invocation_id() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([5; 32]));
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([7; kernel::crypto::HASH_SIZE]);
         let mut spend = CoinTransition::coin(
             signer,
@@ -552,7 +552,7 @@ mod coin_origin_tests {
             program::DeployProgram,
         };
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([6; 32]));
-        let owner = address_from_public_key(&seed.public_key()).unwrap();
+        let owner = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([8; kernel::crypto::HASH_SIZE]);
         let mut payment = CoinTransition::coin(
             owner,
@@ -618,33 +618,33 @@ mod coin_origin_tests {
 }
 
 #[cfg(test)]
-pub fn read_address_activities(
+pub fn read_program_activities(
     directory: &Path,
-    address: [u8; kernel::crypto::ADDRESS_SIZE],
+    program_id: [u8; kernel::crypto::PROGRAM_ID_SIZE],
 ) -> Result<Vec<(u64, Option<u64>)>, String> {
     let database = open(directory)?;
 
     let transaction = database
         .begin_read()
-        .map_err(|error| format!("begin address activity index read: {error}"))?;
+        .map_err(|error| format!("begin program_id activity index read: {error}"))?;
 
     let table = transaction
-        .open_table(ADDRESS_ACTIVITY_INDEX)
-        .map_err(|error| format!("open address activity index table: {error}"))?;
+        .open_table(PROGRAM_ACTIVITY_INDEX)
+        .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
     const ACTIVITY_SUFFIX_SIZE: usize = 8 + 1 + 8;
 
-    let key_size = kernel::crypto::ADDRESS_SIZE + ACTIVITY_SUFFIX_SIZE;
+    let key_size = kernel::crypto::PROGRAM_ID_SIZE + ACTIVITY_SUFFIX_SIZE;
 
     let mut start = Vec::with_capacity(key_size);
-    start.extend_from_slice(&address);
+    start.extend_from_slice(&program_id);
     start.resize(key_size, 0x00);
 
     let mut end = Vec::with_capacity(key_size);
-    end.extend_from_slice(&address);
+    end.extend_from_slice(&program_id);
     end.resize(key_size, 0xff);
 
-    let height_start = kernel::crypto::ADDRESS_SIZE;
+    let height_start = kernel::crypto::PROGRAM_ID_SIZE;
     let height_end = height_start + 8;
     let kind_index = height_end;
     let transaction_start = kind_index + 1;
@@ -654,25 +654,25 @@ pub fn read_address_activities(
 
     for entry in table
         .range(start.as_slice()..=end.as_slice())
-        .map_err(|error| format!("range address activity index: {error}"))?
+        .map_err(|error| format!("range program_id activity index: {error}"))?
     {
         let (key, _) =
-            entry.map_err(|error| format!("read address activity index entry: {error}"))?;
+            entry.map_err(|error| format!("read program_id activity index entry: {error}"))?;
 
         let key = key.value();
 
         if key.len() != key_size {
-            return Err("stored address activity key has invalid length".into());
+            return Err("stored program_id activity key has invalid length".into());
         }
 
-        if key[..kernel::crypto::ADDRESS_SIZE] != address {
-            return Err("stored address activity key has invalid address prefix".into());
+        if key[..kernel::crypto::PROGRAM_ID_SIZE] != program_id {
+            return Err("stored program_id activity key has invalid program_id prefix".into());
         }
 
         let height = u64::from_be_bytes(
             key[height_start..height_end]
                 .try_into()
-                .map_err(|_| "stored address activity height is invalid")?,
+                .map_err(|_| "stored program_id activity height is invalid")?,
         );
 
         let transaction_index = match key[kind_index] {
@@ -681,11 +681,11 @@ pub fn read_address_activities(
             1 => Some(u64::from_be_bytes(
                 key[transaction_start..transaction_end]
                     .try_into()
-                    .map_err(|_| "stored address activity transaction index is invalid")?,
+                    .map_err(|_| "stored program_id activity transaction index is invalid")?,
             )),
 
             _ => {
-                return Err("stored address activity kind is invalid".into());
+                return Err("stored program_id activity kind is invalid".into());
             }
         };
 
@@ -729,12 +729,12 @@ where
             .map_err(|error| format!("clear transaction index: {error}"))?;
 
         let mut activity_index = transaction
-            .open_table(ADDRESS_ACTIVITY_INDEX)
-            .map_err(|error| format!("open address activity index table: {error}"))?;
+            .open_table(PROGRAM_ACTIVITY_INDEX)
+            .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
         activity_index
             .retain(|_, _| false)
-            .map_err(|error| format!("clear address activity index: {error}"))?;
+            .map_err(|error| format!("clear program_id activity index: {error}"))?;
 
         let mut origin_index = transaction
             .open_table(COIN_ORIGIN_INDEX)
@@ -792,15 +792,15 @@ where
             }
 
             for activity in &block.activities {
-                let key = encode_address_activity_key(
-                    activity.address,
+                let key = encode_program_activity_key(
+                    activity.program_id,
                     block.height,
                     activity.transaction_index,
                 );
 
                 activity_index
                     .insert(key.as_slice(), EMPTY_INDEX_VALUE)
-                    .map_err(|error| format!("insert address activity index: {error}"))?;
+                    .map_err(|error| format!("insert program_id activity index: {error}"))?;
             }
         }
 
@@ -817,8 +817,8 @@ where
             .insert(INDEX_TIP_HASH_KEY, tip_hash.as_slice())
             .map_err(|error| format!("write canonical index tip hash: {error}"))?;
         metadata
-            .insert(ADDRESS_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
-            .map_err(|e| format!("write program address index version: {e}"))?;
+            .insert(PROGRAM_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
+            .map_err(|e| format!("write program program_id index version: {e}"))?;
         metadata
             .insert(COIN_ORIGIN_INDEX_VERSION_KEY, &[1_u8][..])
             .map_err(|error| format!("write coin origin index version: {error}"))?;
@@ -967,8 +967,8 @@ fn initialize(database: &Database) -> Result<(), String> {
             .map_err(|error| format!("open transaction index table: {error}"))?;
 
         transaction
-            .open_table(ADDRESS_ACTIVITY_INDEX)
-            .map_err(|error| format!("open address activity index table: {error}"))?;
+            .open_table(PROGRAM_ACTIVITY_INDEX)
+            .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
         transaction
             .open_table(COIN_ORIGIN_INDEX)
@@ -1225,19 +1225,19 @@ pub fn append_block_and_replace_mempool(
         }
 
         let mut activity_index = transaction
-            .open_table(ADDRESS_ACTIVITY_INDEX)
-            .map_err(|error| format!("open address activity index table: {error}"))?;
+            .open_table(PROGRAM_ACTIVITY_INDEX)
+            .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
         for activity in &block.activities {
-            let key = encode_address_activity_key(
-                activity.address,
+            let key = encode_program_activity_key(
+                activity.program_id,
                 block.height,
                 activity.transaction_index,
             );
 
             activity_index
                 .insert(key.as_slice(), EMPTY_INDEX_VALUE)
-                .map_err(|error| format!("insert address activity index: {error}"))?;
+                .map_err(|error| format!("insert program_id activity index: {error}"))?;
         }
 
         let mut transactions = transaction
@@ -1326,12 +1326,12 @@ where
             .map_err(|error| format!("clear transaction index: {error}"))?;
 
         let mut activity_index = transaction
-            .open_table(ADDRESS_ACTIVITY_INDEX)
-            .map_err(|error| format!("open address activity index table: {error}"))?;
+            .open_table(PROGRAM_ACTIVITY_INDEX)
+            .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
         activity_index
             .retain(|_, _| false)
-            .map_err(|error| format!("clear address activity index: {error}"))?;
+            .map_err(|error| format!("clear program_id activity index: {error}"))?;
 
         let mut origin_index = transaction
             .open_table(COIN_ORIGIN_INDEX)
@@ -1371,15 +1371,15 @@ where
 
             tip = Some((block.height, block.hash));
             for activity in &block.activities {
-                let key = encode_address_activity_key(
-                    activity.address,
+                let key = encode_program_activity_key(
+                    activity.program_id,
                     block.height,
                     activity.transaction_index,
                 );
 
                 activity_index
                     .insert(key.as_slice(), EMPTY_INDEX_VALUE)
-                    .map_err(|error| format!("insert address activity index: {error}"))?;
+                    .map_err(|error| format!("insert program_id activity index: {error}"))?;
             }
         }
 
@@ -1401,8 +1401,8 @@ where
             .map_err(|error| format!("write coin origin index version: {error}"))?;
 
         metadata
-            .insert(ADDRESS_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
-            .map_err(|error| format!("write program address index version: {error}"))?;
+            .insert(PROGRAM_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
+            .map_err(|error| format!("write program program_id index version: {error}"))?;
 
         let mut transactions = transaction
             .open_table(MEMPOOL)
@@ -1664,12 +1664,12 @@ pub fn clear_canonical_indexes_for_test(directory: &Path) -> Result<(), String> 
             .map_err(|error| format!("clear transaction index: {error}"))?;
 
         let mut activity_index = transaction
-            .open_table(ADDRESS_ACTIVITY_INDEX)
-            .map_err(|error| format!("open address activity index table: {error}"))?;
+            .open_table(PROGRAM_ACTIVITY_INDEX)
+            .map_err(|error| format!("open program_id activity index table: {error}"))?;
 
         activity_index
             .retain(|_, _| false)
-            .map_err(|error| format!("clear address activity index: {error}"))?;
+            .map_err(|error| format!("clear program_id activity index: {error}"))?;
 
         let mut metadata = transaction
             .open_table(META)

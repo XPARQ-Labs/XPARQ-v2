@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use kernel::{
         common::{Height, Nonce},
-        crypto::{AccountSignatureScheme, Address, SigningSeed, address_from_public_key},
+        crypto::{AccountSignatureScheme, ProgramId, SigningSeed, program_id_from_public_key},
         monetary::coin::Zeno,
         operation::{AuthorizedDeployProgram, BlockOperation},
         program::{AccountAuthorization, CoinTransition, DeployProgram},
@@ -298,7 +298,7 @@ mod tests {
     fn staging_and_resume_cross_the_former_64_mib_budget() {
         let directory = Directory::new();
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([57; 32]));
-        let owner = address_from_public_key(&seed.public_key()).unwrap();
+        let owner = program_id_from_public_key(&seed.public_key()).unwrap();
         let mut code = b"XPVM".to_vec();
         code.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0, 0]);
         code.resize(kernel::program::MAX_PROGRAM_CODE_SIZE - 10, 0); // NOP padding.
@@ -327,7 +327,7 @@ mod tests {
             kernel::crypto::PreviousHash::ZERO,
             0x207f_ffff,
             Nonce(1),
-            Some(super::super::Emission::new(Address::ZERO, Zeno::ONE)),
+            Some(super::super::Emission::new(ProgramId::ZERO, Zeno::ONE)),
             vec![operation],
         )
         .unwrap();

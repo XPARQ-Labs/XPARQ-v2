@@ -28,24 +28,21 @@ fn asset(args: &[String]) -> Result<AssetContract, String> {
         .map_err(|_| "invalid program asset id".into())
 }
 fn encode<T: borsh::BorshSerialize>(opcode: AssetOpcode, value: &T) -> Result<ProgramCall, String> {
-    Ok(ProgramCall {
-        program: SystemProgramId::ASSET,
-        opcode: opcode as u8,
-        payload: borsh::to_vec(value).map_err(|e| e.to_string())?,
-    })
+    kernel::program::system::monetary::asset_call(opcode, value)
+        .map_err(|e| format!("invalid monetary call: {e:?}"))
 }
 fn recipient(args: &[String]) -> Result<Owner, String> {
     super::util::parse_owner(option(args, "--to").ok_or("missing --to")?)
 }
 fn shares(
     rpc: &str,
-    owner: Address,
+    owner: ProgramId,
     asset: AssetContract,
     required: Option<Unit>,
 ) -> Result<(Vec<Share>, Unit), String> {
-    let address = kernel::crypto::address_to_string(&owner);
+    let program_id = kernel::crypto::program_id_to_string(&owner);
     let response: serde_json::Value =
-        http_get_json(rpc, &format!("/program/asset/{asset}/balance/{address}"))?;
+        http_get_json(rpc, &format!("/program/asset/{asset}/balance/{program_id}"))?;
     let mut inputs = Vec::new();
     let mut total = Unit::ZERO;
     for share in response["shares"]
@@ -80,20 +77,44 @@ fn shares(
     Ok((inputs, total))
 }
 
-fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(), String> {
+fn submit(args: &[String], wallet: LoadedWallet, call: ProgramCall) -> Result<(), String> {
     reject_manual_fee(args)?;
     extension::script::execute::decode_program(&call)
         .map_err(|e| format!("invalid ProgramCall: {e:?}"))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let deposit = option(args, "--deposit")
+        .map(parse_amount)
+        .transpose()?
+        .map_or(0, Zeno::as_zeno);
+    let deposit_owner = if deposit > 0 {
+        let (id, _) = kernel::program::vm_app::call_input(&call)
+            .map_err(|_| "--deposit requires a VM call")?;
+        Some(Owner::Program(id))
+    } else {
+        None
+    };
     // Quote state growth using a signed envelope; the quote performs no mutation.
-    let (inputs, _, _, change) = select_account_inputs_with_state_burn(rpc, wallet, 1, 1, 0, 0)?;
-    let outputs = if change > 0 {
-        vec![CoinOutput::new(wallet.address(), Zeno::from_zeno(change))]
+    let (inputs, _, _, change) = select_account_inputs_with_state_burn(
+        rpc,
+        &wallet,
+        deposit.checked_add(1).ok_or("deposit plus fee overflow")?,
+        1 + u64::from(deposit_owner.is_some()),
+        0,
+        0,
+    )?;
+    let mut outputs = if change > 0 {
+        vec![CoinOutput::new(
+            wallet.program_id(),
+            Zeno::from_zeno(change),
+        )]
     } else {
         vec![]
     };
+    if let Some(owner) = deposit_owner {
+        outputs.push(CoinOutput::to_owner(owner, Zeno::from_zeno(deposit)));
+    }
     let payment = CoinTransition::coin_with_charges(
-        wallet.address(),
+        wallet.program_id(),
         inputs,
         outputs,
         CoinCharges::new(Zeno::ONE),
@@ -123,23 +144,30 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
     let transaction = automatic_fee_transaction(|fee, archival| {
         let (inputs, _, _, change) = super::transaction::select_account_inputs_with_vm_state_burn(
             rpc,
-            wallet,
+            &wallet,
             fee.checked_add(vm_fuel)
-                .ok_or("fee plus VM fuel burn overflow")?,
-            1_u64
+                .and_then(|v| v.checked_add(deposit))
+                .ok_or("fee plus VM fuel and deposit overflow")?,
+            (1_u64 + u64::from(deposit_owner.is_some()))
                 .checked_add(vm_created)
                 .ok_or("VM output count overflow")?,
             growth,
             archival,
             vm_consumed,
         )?;
-        let outputs = if change > 0 {
-            vec![CoinOutput::new(wallet.address(), Zeno::from_zeno(change))]
+        let mut outputs = if change > 0 {
+            vec![CoinOutput::new(
+                wallet.program_id(),
+                Zeno::from_zeno(change),
+            )]
         } else {
             vec![]
         };
+        if let Some(owner) = deposit_owner {
+            outputs.push(CoinOutput::to_owner(owner, Zeno::from_zeno(deposit)));
+        }
         let payment = CoinTransition::coin_with_charges(
-            wallet.address(),
+            wallet.program_id(),
             inputs,
             outputs,
             CoinCharges::new(Zeno::from_zeno(fee)),
@@ -149,6 +177,7 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
             wallet.0.sign_program_call(call.clone(), payment)?,
         )))
     })?;
+    drop(wallet);
     submit_or_print_transaction(args, &transaction)
 }
 
@@ -171,16 +200,18 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     if command == "program-balance" {
-        let owner = match option(args, "--address") {
-            Some(v) => address_from_string(v).map_err(|e| e.to_string())?,
-            None => load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.address(),
+        let owner = match option(args, "--program-id") {
+            Some(v) => program_id_from_string(v).map_err(|e| e.to_string())?,
+            None => {
+                load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?.program_id()
+            }
         };
         let value: serde_json::Value = http_get_json(
             rpc,
             &format!(
                 "/program/asset/{}/balance/{}",
                 asset(args)?,
-                kernel::crypto::address_to_string(&owner)
+                kernel::crypto::program_id_to_string(&owner)
             ),
         )?;
         super::cli::print_human_json(&value);
@@ -205,9 +236,9 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
             let max_supply = amount(args, "--max-supply")?;
             let initial_mint = amount(args, "--initial-mint")?;
             let authority = if has_flag(args, "--fixed-supply") {
-                Address::ZERO
+                ProgramId::ZERO
             } else {
-                wallet.address()
+                wallet.program_id()
             };
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -216,8 +247,8 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
             let metadata = Metadata::new(
                 name.clone(),
                 max_supply,
-                Owner::Address(wallet.address()),
-                Owner::Address(authority),
+                Owner::Program(wallet.program_id()),
+                Owner::Program(authority),
             )
             .map_err(|e| e.to_string())?;
             let id = AssetContract::derive(&metadata, nonce).map_err(|e| e.to_string())?;
@@ -227,11 +258,11 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                     name,
                     max_supply,
                     initial_mint,
-                    mint_authority: Owner::Address(authority),
+                    mint_authority: Owner::Program(authority),
                     nonce,
                 },
             )?;
-            submit(args, &wallet, call)?;
+            submit(args, wallet, call)?;
             println!("program asset: {id}");
             return Ok(());
         }
@@ -260,13 +291,13 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
             } else {
                 Some(amount(args, "--amount")?)
             };
-            let (inputs, total) = shares(rpc, wallet.address(), id, required)?;
+            let (inputs, total) = shares(rpc, wallet.program_id(), id, required)?;
             if command == "program-consolidate" && inputs.len() < 2 {
                 return Err("program consolidation requires at least two shares".into());
             }
             let sent = required.unwrap_or(total);
             let to = if command == "program-consolidate" {
-                Owner::Address(wallet.address())
+                Owner::Program(wallet.program_id())
             } else {
                 recipient(args)?
             };
@@ -275,7 +306,10 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
                 .checked_sub(sent)
                 .ok_or("insufficient program balance")?;
             if !change.is_zero() {
-                outputs.push(AssetOutput::new(Owner::Address(wallet.address()), change));
+                outputs.push(AssetOutput::new(
+                    Owner::Program(wallet.program_id()),
+                    change,
+                ));
             }
             encode(
                 AssetOpcode::Transfer,
@@ -289,7 +323,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         "program-burn" => {
             let id = asset(args)?;
             let burn = amount(args, "--amount")?;
-            let (inputs, total) = shares(rpc, wallet.address(), id, Some(burn))?;
+            let (inputs, total) = shares(rpc, wallet.program_id(), id, Some(burn))?;
             encode(
                 AssetOpcode::Burn,
                 &Burn {
@@ -304,7 +338,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<(), String> {
         }
         _ => unreachable!(),
     };
-    submit(args, &wallet, call)
+    submit(args, wallet, call)
 }
 
 fn vm_call(args: &[String]) -> Result<ProgramCall, String> {
@@ -312,10 +346,26 @@ fn vm_call(args: &[String]) -> Result<ProgramCall, String> {
     if value.len() != 64 {
         return Err("program id must contain exactly 64 hexadecimal characters".into());
     }
-    let payload = hex::decode(value).map_err(|_| "invalid hexadecimal program id")?;
+    let mut payload = hex::decode(value).map_err(|_| "invalid hexadecimal program id")?;
+    let data = option(args, "--data")
+        .map(hex::decode)
+        .transpose()
+        .map_err(|_| "invalid hexadecimal call data")?;
+    if data
+        .as_ref()
+        .is_some_and(|v| v.len() > kernel::program::vm_app::MAX_DATA_BYTES)
+    {
+        return Err("call data exceeds 4096 bytes".into());
+    }
+    let opcode = if let Some(data) = data {
+        payload.extend(data);
+        1
+    } else {
+        0
+    };
     Ok(ProgramCall {
         program: SystemProgramId::VM,
-        opcode: 0,
+        opcode,
         payload,
     })
 }

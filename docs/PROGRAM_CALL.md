@@ -1,6 +1,6 @@
 # ProgramCall integration
 
-See [architecture](ARCHITECTURE.md), [XPVM v1](XPVM.md), and
+See [architecture](ARCHITECTURE.md), [XPVM](XPVM.md), and
 [wallet commands](../wallet/README.md#extension-asset-program).
 
 ## Canonical operations and identities
@@ -14,15 +14,30 @@ Active preparation helpers live in `kernel::program::preparation`.
 
 | Identity | Meaning |
 | --- | --- |
-| SystemProgramId(u32) | Dispatcher route: XPQ=0, ASSET=1, VM=2 |
-| ProgramId (32-byte hash) | Deployed bytecode registry identity |
-| Asset contract ID | Canonical asset identity, separate from the deployed registry |
+| SystemProgramId(u32) | Dispatcher route: MONETARY=0, VM=2; route 1 is a legacy asset decoder alias |
+| ProgramId (32 bytes) | Owner instance: implicit signature policy or deployed bytecode |
+| Asset contract ID | Canonical asset identity, separate from the owning program |
 
-The dispatcher rename preserves numeric tags and canonical Borsh encoding.
-XPQ transfer uses route 0, method 1 and an empty payload; its inputs, outputs and
-miner fee come from the signed payment. ASSET dispatches registration, mint,
-transfer and burn. VM route 2, opcode 0 receives a deployed hash as payload.
-System XPQ/asset applications execute in extension; VM bytecode executes in kernel.
+One monetary system program handles all monetary methods:
+
+| Opcode | Operation | Payload |
+| --- | --- | --- |
+| 1 | Transfer | Currency byte: 0 coin, 1 asset; then currency-specific data |
+| 2 | Create asset | Canonical Register payload |
+| 3 | Mint asset | Canonical Mint payload including asset contract |
+| 4 | Burn | Currency byte: 0 coin, 1 asset; then currency-specific data |
+
+Coin transfer uses currency byte 0 with no additional data: its inputs, outputs
+and miner fee come exclusively from the signed payment. The historical empty
+coin-transfer payload remains accepted. Asset transfer/burn append their bounded
+canonical payload after currency byte 1. Unknown currencies, malformed data and
+voluntary coin burn are rejected. Create and mint retain their asset-specific
+rules. Route 1 only decodes historical asset opcodes into the same implementation;
+it is not another installed application. Wallets emit route 0.
+
+VM route 2, opcode 0 receives a deployed instance hash as payload; opcode 1 appends
+bounded application calldata. Monetary application execution lives in
+`extension::monetary`; VM execution and checked monetary hosts remain in kernel.
 
 ## State ownership and authorization
 
@@ -32,7 +47,7 @@ restricted hosts rather than mutable LedgerState. Runtime installs
 `extension::SystemApplications` for preview, commit, replay, mempool and quotes,
 and reinstalls it on snapshot load. Executor capabilities are not serialized.
 
-The coin host binds consumption, address outputs, miner fee and burn to the signed
+The coin host binds consumption, program-owned outputs, miner fee and burn to the signed
 payment. AssetHost binds its one operation to the signed asset instruction.
 Kernel checks ownership, mint nonce, conservation and supply. Coin supply obeys
 `total_mined - total_burned = sum(live coin UTXOs)`; asset supply is reconciled
@@ -63,11 +78,12 @@ Snapshots contain canonical state and rollback journals, not application executo
 | POST /program/deploy | Signed Borsh AuthorizedDeployProgram, without BlockOperation wrapper |
 | POST /program/deploy/quote | Draft Borsh AuthorizedDeployProgram before signing; validates deploy structure and returns commitment/burn |
 | GET /program/asset/{asset} | Metadata, supply and mint nonce |
-| GET /program/asset/{asset}/balance/{address} | Balance and owned shares |
+| GET /program/asset/{asset}/balance/{program_id} | Balance and owned shares |
 
-Program quote verifies authorization but does not validate exact payment burn or
-funding availability. It returns `created_state_weight`, `vm_fuel` (zero for non-VM calls), and
-canonical `tip_hash`. VM quotes execute read-only against the current registry;
+Program quote verifies authorization but does not validate exact payment burn.
+VM quotes also check payment input ownership/conservation and program balances. It returns `created_state_weight`, `vm_fuel` (zero for non-VM calls), and
+canonical `tip_hash`, plus `vm_return_value` as a decimal string for VM calls.
+VM quotes preview the current registry, storage, and monetary state;
 they reject missing programs, invalid code, overflow, and exhausted fuel. VM
 payments must include one zeno of burn per fuel unit in addition to existing
 state and archival burn.
@@ -126,3 +142,15 @@ cargo test -p node --test network_e2e --offline program_lifecycle_gossips_across
 ```
 
 Node integration checks bind local RPC/P2P sockets. GUI work remains deferred.
+
+## Universal ownership
+
+See [ownership design](OWNERSHIP.md). Coin-share owners, asset-share owners,
+creators, mint authorities, signer, payment principal and deployer all use
+ProgramId. Public keys and signatures appear in authorization proofs. Program IDs
+have one display/CLI/RPC format: exactly 64 hexadecimal characters. Public RPC
+owner objects have type `program` and a hex value. Legacy wallet-identity endpoints
+are removed; balance/history queries operate on ProgramId.
+
+Chain-spec version 6 and database schema 14 require an updated node and a new
+compatible database. No existing-chain migration is provided.

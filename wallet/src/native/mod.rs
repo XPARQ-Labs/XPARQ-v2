@@ -9,13 +9,13 @@ use kernel::monetary::coin::{CoinOutput, CoinShare, Zeno};
 use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight},
-    crypto::{Address, Signature, address_from_string},
+    crypto::{ProgramId, Signature, program_id_from_string},
     program::{AuthorizedProgramEnvelope, CoinCharges, CoinTransition},
 };
 use serde::Deserialize;
 use wallet::{
     AccountWallet, account_wallet_file_bytes, account_wallet_from_bip39_mnemonic,
-    account_wallet_from_file_bytes, generate_bip39_mnemonic, wallet_address_from_file_bytes,
+    account_wallet_from_file_bytes, generate_bip39_mnemonic, wallet_program_id_from_file_bytes,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -29,8 +29,8 @@ const HISTORY_CURSOR_HEX_LEN: usize = 34;
 struct LoadedWallet(AccountWallet);
 
 impl LoadedWallet {
-    fn address(&self) -> Address {
-        self.0.address
+    fn program_id(&self) -> ProgramId {
+        self.0.program_id
     }
 
     fn sign_onchain_spend(
@@ -94,17 +94,17 @@ struct AccountUtxo {
 }
 
 #[derive(Deserialize)]
-struct AddressHistoryResponse {
-    address: String,
+struct ProgramHistoryResponse {
+    program_id: String,
     tip_height: u64,
     emission_count: usize,
-    activities: Vec<AddressActivity>,
+    activities: Vec<ProgramActivity>,
     #[serde(default)]
     next_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct AddressActivity {
+struct ProgramActivity {
     height: u64,
     block_hash: String,
     hash: Option<String>,
@@ -129,7 +129,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         None | Some("menu") | Some("interactive") => interactive_menu(),
         Some("new") => create_wallet(&args[1..]),
         Some("restore") => restore_wallet(&args[1..]),
-        Some("address") => print_address(&args[1..]),
+        Some("program-id") => print_program_id(&args[1..]),
         Some("balance") => print_balance(&args[1..]),
         Some("history") => print_history(&args[1..]),
         Some("utxos") | Some("utxo-tracker") => print_utxo_tracker(&args[1..]),
@@ -164,7 +164,7 @@ mod wallet_file;
 
 use wallet_file::{load_wallet, write_account_wallet};
 
-use cli::{create_wallet, interactive_menu, print_address, restore_wallet};
+use cli::{create_wallet, interactive_menu, print_program_id, restore_wallet};
 use util::{format_amount, has_flag, option, parse_amount, print_help, repeated_options};
 
 use balance::print_balance;

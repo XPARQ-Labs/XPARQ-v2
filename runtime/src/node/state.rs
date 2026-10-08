@@ -443,11 +443,16 @@ fn replay_body_reader(
     mut ledger: Ledger,
     reader: crate::storage::CanonicalBodyReader,
 ) -> Result<Ledger, String> {
+    let mut pow_memory = None;
     for bytes in reader {
         let block =
             decode_block(&bytes?).map_err(|error| format!("decode stored body: {error}"))?;
-        apply_block(&mut ledger, block)
-            .map_err(|error| format!("validate stored body: {error}"))?;
+        kernel::consensus::apply_block_with_pow_memory(
+            &mut ledger,
+            block,
+            pow_memory.get_or_insert_with(new_pow_memory),
+        )
+        .map_err(|error| format!("validate stored body: {error}"))?;
         super::journal::prune_journals(path, &mut ledger)?;
         trim_body_cache(&mut ledger)?;
         if let Err(error) = crate::snapshot::write_if_due(path, &ledger) {

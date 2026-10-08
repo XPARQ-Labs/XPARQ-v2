@@ -10,6 +10,8 @@ pub const MAX_PROGRAM_PAYLOAD_SIZE: usize = 64 * 1024;
 pub struct SystemProgramId(pub u32);
 
 impl SystemProgramId {
+    pub const MONETARY: Self = Self(0);
+    /// Compatibility alias for the native coin-transfer route.
     pub const XPQ: Self = Self(0);
     pub const ASSET: Self = Self(1);
     pub const VM: Self = Self(2);

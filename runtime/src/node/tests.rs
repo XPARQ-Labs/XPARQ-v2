@@ -31,15 +31,16 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
         "/fee-policy",
         "/blocks/latest",
         "/block/{height}",
-        "/balance/{address}",
-        "/account/{address}",
+        "/program/balance/{program_id}",
+        "/program/account/{program_id}",
         "/coin-origin/{share}",
         "/program/quote",
+        "/program/state/{program_id}/{key}",
         "/program/deploy",
         "/program/deploy/quote",
         "/program/asset/{asset}",
-        "/program/asset/{asset}/balance/{address}",
-        "/explorer/address/{address}",
+        "/program/asset/{asset}/balance/{program_id}",
+        "/explorer/program/{program_id}",
         "/explorer/transaction/{transaction_id}",
         "/transaction",
     ] {
@@ -56,18 +57,18 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
 }
 
 #[test]
-fn explorer_address_response_is_aggregate_only() {
+fn explorer_program_response_is_aggregate_only() {
     let ledger = kernel::genesis::genesis_ledger()
         .unwrap()
         .with_applications(extension::SystemApplications);
     let database = test_database("explorer-address-aggregate");
-    let response = explorer_address_response(
+    let response = explorer_program_response(
         &database,
         &ledger,
         &[],
-        Address([7; kernel::crypto::ADDRESS_SIZE]),
+        ProgramId([7; kernel::crypto::PROGRAM_ID_SIZE]),
         true,
-        DEFAULT_ADDRESS_ACTIVITY_LIMIT,
+        DEFAULT_PROGRAM_ACTIVITY_LIMIT,
         None,
     )
     .unwrap();
@@ -84,7 +85,7 @@ fn explorer_address_pagination_rebuilds_after_reorg() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x92; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x92; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let target_bits = ledger
         .chain
@@ -111,7 +112,7 @@ fn explorer_address_pagination_rebuilds_after_reorg() {
     }
 
     let page_a =
-        address_activity_page(&database, &ledger, miner, None, 2).expect("read branch A page");
+        program_activity_page(&database, &ledger, miner, None, 2).expect("read branch A page");
 
     assert_eq!(
         page_a.locations,
@@ -147,7 +148,7 @@ fn explorer_address_pagination_rebuilds_after_reorg() {
 
     // Tip changed, so persistent activity index must rebuild.
     let page_b =
-        address_activity_page(&database, &ledger, miner, None, 2).expect("read branch B page");
+        program_activity_page(&database, &ledger, miner, None, 2).expect("read branch B page");
 
     assert_eq!(
         page_b.locations,
@@ -159,7 +160,7 @@ fn explorer_address_pagination_rebuilds_after_reorg() {
 
     let cursor = page_b.next_cursor.expect("branch B first page cursor");
 
-    let page_b2 = address_activity_page(&database, &ledger, miner, Some(cursor), 2)
+    let page_b2 = program_activity_page(&database, &ledger, miner, Some(cursor), 2)
         .expect("read branch B second page");
 
     assert_eq!(
@@ -181,7 +182,7 @@ fn explorer_address_pagination_advances_when_emissions_are_hidden() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x93; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x93; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let target_bits = ledger
         .chain
@@ -206,7 +207,7 @@ fn explorer_address_pagination_advances_when_emissions_are_hidden() {
             .expect("insert emission block");
     }
 
-    let first = explorer_address_response(&database, &ledger, &[], miner, false, 2, None)
+    let first = explorer_program_response(&database, &ledger, &[], miner, false, 2, None)
         .expect("first hidden-emission page");
 
     assert_eq!(first["activity_count"], 0);
@@ -226,11 +227,11 @@ fn explorer_address_pagination_advances_when_emissions_are_hidden() {
 
     let cursor_bytes = hex::decode(cursor_hex).expect("decode activity cursor");
 
-    let cursor: [u8; crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE] = cursor_bytes
+    let cursor: [u8; crate::storage::PROGRAM_ACTIVITY_CURSOR_SIZE] = cursor_bytes
         .try_into()
         .expect("activity cursor has correct size");
 
-    let second = explorer_address_response(&database, &ledger, &[], miner, false, 2, Some(cursor))
+    let second = explorer_program_response(&database, &ledger, &[], miner, false, 2, Some(cursor))
         .expect("second hidden-emission page");
 
     assert_eq!(second["activity_count"], 0);
@@ -253,16 +254,16 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
     let sender =
         wallet::account_wallet_from_bip39_mnemonic(&mnemonic, kernel::crypto::Signature::MlDsa44)
             .unwrap();
-    let recipient = Address([4; kernel::crypto::ADDRESS_SIZE]);
-    let miner = Address([5; kernel::crypto::ADDRESS_SIZE]);
+    let recipient = ProgramId([4; kernel::crypto::PROGRAM_ID_SIZE]);
+    let miner = ProgramId([5; kernel::crypto::PROGRAM_ID_SIZE]);
     let intent = kernel::program::CoinTransition::coin(
-        sender.address,
+        sender.program_id,
         vec![kernel::monetary::coin::CoinShare::from_bytes(
             [6; kernel::monetary::coin::CoinShare::SIZE],
         )],
         vec![
             CoinOutput::new(recipient, Zeno::from_zeno(10)),
-            CoinOutput::new(sender.address, Zeno::from_zeno(5)),
+            CoinOutput::new(sender.program_id, Zeno::from_zeno(5)),
         ],
     )
     .unwrap();
@@ -279,7 +280,7 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
     )
     .unwrap();
 
-    let outgoing = address_transaction_activity(&transaction, sender.address, &block)
+    let outgoing = program_transaction_activity(&transaction, sender.program_id, &block)
         .unwrap()
         .unwrap();
     assert_eq!(outgoing["direction"], "out");
@@ -288,15 +289,15 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
         outgoing["size_bytes"],
         canonical_bytes(&transaction).unwrap().len()
     );
-    let incoming = address_transaction_activity(&transaction, recipient, &block)
+    let incoming = program_transaction_activity(&transaction, recipient, &block)
         .unwrap()
         .unwrap();
     assert_eq!(incoming["direction"], "in");
     assert_eq!(incoming["amount"], 10);
     assert!(
-        address_transaction_activity(
+        program_transaction_activity(
             &transaction,
-            Address([9; kernel::crypto::ADDRESS_SIZE]),
+            ProgramId([9; kernel::crypto::PROGRAM_ID_SIZE]),
             &block,
         )
         .unwrap()
@@ -328,7 +329,7 @@ fn test_database(label: &str) -> PathBuf {
 fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     let database = test_database("failed-reorg-root");
     let _ = load_or_initialize_owned(&database).expect("initialize genesis");
-    let miner = Address([0xa1; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0xa1; kernel::crypto::PROGRAM_ID_SIZE]);
     let mut memory = new_pow_memory();
     assert!(matches!(
         mine_block_database(&database, miner, 0, 100, &mut memory).unwrap(),
@@ -340,7 +341,7 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     let original_tip = altered.tip_hash().unwrap();
     let (coin_id, coin) = altered.state.utxos.coins().next().expect("emission coin");
     let mut coin = *coin;
-    coin.owner = kernel::common::Owner::Address(Address([0xa2; kernel::crypto::ADDRESS_SIZE]));
+    coin.owner = kernel::common::Owner::Program(ProgramId([0xa2; kernel::crypto::PROGRAM_ID_SIZE]));
     // Forge a serialized fixture without exposing ledger mutation APIs.
     let mut coins: std::collections::BTreeMap<_, _> = altered
         .state
@@ -428,7 +429,7 @@ fn failed_reorg_after_applying_alternative_block_keeps_database_and_cache() {
     assert!(matches!(
         mine_block_database(
             &database,
-            Address([0xb1; kernel::crypto::ADDRESS_SIZE]),
+            ProgramId([0xb1; kernel::crypto::PROGRAM_ID_SIZE]),
             0,
             100,
             &mut memory,
@@ -444,7 +445,7 @@ fn failed_reorg_after_applying_alternative_block_keeps_database_and_cache() {
     let mut alternative = kernel::genesis::genesis_ledger()
         .unwrap()
         .with_applications(extension::SystemApplications);
-    let miner = Address([0xb2; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0xb2; kernel::crypto::PROGRAM_ID_SIZE]);
     let mut first = Block::from_protocol_operations(
         Height(1),
         alternative.tip_hash().unwrap(),
@@ -544,7 +545,7 @@ fn failed_reorg_after_applying_alternative_block_keeps_database_and_cache() {
     assert_eq!(load_existing(&database).unwrap().tip_hash(), original_tip);
 }
 
-fn append_synthetic_header_block(ledger: &mut Ledger, miner: Address) {
+fn append_synthetic_header_block(ledger: &mut Ledger, miner: ProgramId) {
     let height = Height(
         ledger
             .tip_height()
@@ -615,7 +616,7 @@ fn checkpoint_state_matches_sequential_state_at_boundaries() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x73; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x73; kernel::crypto::PROGRAM_ID_SIZE]);
 
     while ledger.tip_height() != Some(Height(512)) {
         append_synthetic_header_block(&mut ledger, miner);
@@ -691,12 +692,12 @@ fn explorer_tx_index_finds_canonical_transaction() {
         wallet::account_wallet_from_bip39_mnemonic(&mnemonic, kernel::crypto::Signature::MlDsa44)
             .unwrap();
 
-    let recipient = Address([0x32; kernel::crypto::ADDRESS_SIZE]);
+    let recipient = ProgramId([0x32; kernel::crypto::PROGRAM_ID_SIZE]);
 
-    let miner = Address([0x33; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x33; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let intent = kernel::program::CoinTransition::coin(
-        sender.address,
+        sender.program_id,
         vec![kernel::monetary::coin::CoinShare::from_bytes(
             [0x34; kernel::monetary::coin::CoinShare::SIZE],
         )],
@@ -823,7 +824,7 @@ fn explorer_index_extends_after_canonical_append() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x41; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x41; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let make_transaction = |seed_byte: u8, input_byte: u8, recipient_byte: u8| {
         let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
@@ -834,10 +835,10 @@ fn explorer_index_extends_after_canonical_append() {
         )
         .unwrap();
 
-        let recipient = Address([recipient_byte; kernel::crypto::ADDRESS_SIZE]);
+        let recipient = ProgramId([recipient_byte; kernel::crypto::PROGRAM_ID_SIZE]);
 
         let intent = kernel::program::CoinTransition::coin(
-            sender.address,
+            sender.program_id,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
@@ -924,9 +925,9 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner_a = Address([0x51; kernel::crypto::ADDRESS_SIZE]);
+    let miner_a = ProgramId([0x51; kernel::crypto::PROGRAM_ID_SIZE]);
 
-    let miner_b = Address([0x52; kernel::crypto::ADDRESS_SIZE]);
+    let miner_b = ProgramId([0x52; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let make_transaction = |seed_byte: u8, input_byte: u8, recipient_byte: u8| {
         let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
@@ -937,10 +938,10 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
         )
         .unwrap();
 
-        let recipient = Address([recipient_byte; kernel::crypto::ADDRESS_SIZE]);
+        let recipient = ProgramId([recipient_byte; kernel::crypto::PROGRAM_ID_SIZE]);
 
         let intent = kernel::program::CoinTransition::coin(
-            sender.address,
+            sender.program_id,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
@@ -1029,20 +1030,20 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
 }
 
 #[test]
-fn explorer_address_index_rebuilds_after_reorg() {
+fn explorer_program_index_rebuilds_after_reorg() {
     let database = test_database("explorer-address-index-reorg");
 
     let mut ledger = kernel::genesis::genesis_ledger()
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner_a = Address([0x61; kernel::crypto::ADDRESS_SIZE]);
-    let miner_b = Address([0x62; kernel::crypto::ADDRESS_SIZE]);
+    let miner_a = ProgramId([0x61; kernel::crypto::PROGRAM_ID_SIZE]);
+    let miner_b = ProgramId([0x62; kernel::crypto::PROGRAM_ID_SIZE]);
 
-    let recipient_a = Address([0x63; kernel::crypto::ADDRESS_SIZE]);
-    let recipient_b = Address([0x64; kernel::crypto::ADDRESS_SIZE]);
+    let recipient_a = ProgramId([0x63; kernel::crypto::PROGRAM_ID_SIZE]);
+    let recipient_b = ProgramId([0x64; kernel::crypto::PROGRAM_ID_SIZE]);
 
-    let make_transaction = |seed_byte: u8, input_byte: u8, recipient: Address| {
+    let make_transaction = |seed_byte: u8, input_byte: u8, recipient: ProgramId| {
         let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
 
         let sender = wallet::account_wallet_from_bip39_mnemonic(
@@ -1052,7 +1053,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         .unwrap();
 
         let intent = kernel::program::CoinTransition::coin(
-            sender.address,
+            sender.program_id,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
@@ -1086,7 +1087,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         .insert_block(block_a)
         .expect("insert branch A block");
 
-    let recipient_a_activities = address_activity_locations(&database, &ledger, recipient_a)
+    let recipient_a_activities = program_activity_locations(&database, &ledger, recipient_a)
         .expect("branch A recipient activities");
 
     assert_eq!(
@@ -1098,7 +1099,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
     );
 
     let miner_a_activities =
-        address_activity_locations(&database, &ledger, miner_a).expect("branch A miner activities");
+        program_activity_locations(&database, &ledger, miner_a).expect("branch A miner activities");
 
     assert!(miner_a_activities.contains(&ActivityLocation::Emission { height: Height(1) },));
 
@@ -1127,21 +1128,21 @@ fn explorer_address_index_rebuilds_after_reorg() {
         .expect("insert branch B block");
 
     assert!(
-        address_activity_locations(&database, &ledger, recipient_a,)
+        program_activity_locations(&database, &ledger, recipient_a,)
             .expect("orphan recipient lookup")
             .is_empty(),
         "orphan recipient activity remained indexed",
     );
 
     assert!(
-        address_activity_locations(&database, &ledger, miner_a,)
+        program_activity_locations(&database, &ledger, miner_a,)
             .expect("orphan miner lookup")
             .is_empty(),
         "orphan emission remained indexed",
     );
 
     assert_eq!(
-        address_activity_locations(&database, &ledger, recipient_b,)
+        program_activity_locations(&database, &ledger, recipient_b,)
             .expect("branch B recipient lookup"),
         vec![ActivityLocation::Transaction {
             height: Height(1),
@@ -1150,7 +1151,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
     );
 
     assert!(
-        address_activity_locations(&database, &ledger, miner_b,)
+        program_activity_locations(&database, &ledger, miner_b,)
             .expect("branch B miner lookup")
             .contains(&ActivityLocation::Emission { height: Height(1) },)
     );
@@ -1165,19 +1166,19 @@ fn explorer_address_index_rebuilds_after_reorg() {
     );
 
     assert!(
-        crate::storage::read_address_activities(&database, recipient_b.0,)
+        crate::storage::read_program_activities(&database, recipient_b.0,)
             .expect("read cleared recipient activity index")
             .is_empty(),
     );
 
     assert!(
-        crate::storage::read_address_activities(&database, miner_b.0,)
+        crate::storage::read_program_activities(&database, miner_b.0,)
             .expect("read cleared miner activity index")
             .is_empty(),
     );
 
     // First address lookup must rebuild all persistent canonical indexes.
-    let rebuilt_recipient = address_activity_locations(&database, &ledger, recipient_b)
+    let rebuilt_recipient = program_activity_locations(&database, &ledger, recipient_b)
         .expect("rebuild recipient address activity index");
 
     assert_eq!(
@@ -1188,7 +1189,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         }],
     );
 
-    let rebuilt_miner = address_activity_locations(&database, &ledger, miner_b)
+    let rebuilt_miner = program_activity_locations(&database, &ledger, miner_b)
         .expect("lookup rebuilt miner activity index");
 
     assert!(rebuilt_miner.contains(&ActivityLocation::Emission { height: Height(1) },),);
@@ -1202,7 +1203,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
     );
 
     assert!(
-        !crate::storage::read_address_activities(&database, recipient_b.0,)
+        !crate::storage::read_program_activities(&database, recipient_b.0,)
             .expect("read rebuilt recipient activity index")
             .is_empty(),
     );
@@ -1225,7 +1226,7 @@ fn explorer_address_pagination_uses_exclusive_cursor() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x91; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x91; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let target_bits = ledger
         .chain
@@ -1251,7 +1252,7 @@ fn explorer_address_pagination_uses_exclusive_cursor() {
     }
 
     // Page 1: newest two activities.
-    let page1 = address_activity_page(&database, &ledger, miner, None, 2)
+    let page1 = program_activity_page(&database, &ledger, miner, None, 2)
         .expect("read first activity page");
 
     assert_eq!(
@@ -1265,7 +1266,7 @@ fn explorer_address_pagination_uses_exclusive_cursor() {
     let cursor1 = page1.next_cursor.expect("first page has next cursor");
 
     // Cursor must be exclusive: height 4 must not appear again.
-    let page2 = address_activity_page(&database, &ledger, miner, Some(cursor1), 2)
+    let page2 = program_activity_page(&database, &ledger, miner, Some(cursor1), 2)
         .expect("read second activity page");
 
     assert_eq!(
@@ -1278,7 +1279,7 @@ fn explorer_address_pagination_uses_exclusive_cursor() {
 
     let cursor2 = page2.next_cursor.expect("second page has next cursor");
 
-    let page3 = address_activity_page(&database, &ledger, miner, Some(cursor2), 2)
+    let page3 = program_activity_page(&database, &ledger, miner, Some(cursor2), 2)
         .expect("read final activity page");
 
     assert_eq!(
@@ -1366,7 +1367,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x71; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x71; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let make_transaction = |seed_byte: u8, input_byte: u8, recipient_byte: u8| {
         let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
@@ -1377,10 +1378,10 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         )
         .unwrap();
 
-        let recipient = Address([recipient_byte; kernel::crypto::ADDRESS_SIZE]);
+        let recipient = ProgramId([recipient_byte; kernel::crypto::PROGRAM_ID_SIZE]);
 
         let intent = kernel::program::CoinTransition::coin(
-            sender.address,
+            sender.program_id,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
@@ -1495,7 +1496,7 @@ fn block_index_extends_and_rebuilds_after_reorg() {
         .expect("genesis ledger")
         .with_applications(extension::SystemApplications);
 
-    let miner = Address([0x81; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0x81; kernel::crypto::PROGRAM_ID_SIZE]);
 
     let target_bits = ledger
         .chain
@@ -1660,7 +1661,7 @@ fn redb_startup_round_trips_canonical_genesis() {
 
 #[test]
 fn deploy_operation_is_mined_persisted_and_replayed() {
-    use kernel::crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+    use kernel::crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
     use kernel::{
         consensus::quote_deploy_burn,
         operation::{AuthorizedDeployProgram, BlockOperation},
@@ -1668,7 +1669,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
     };
     let database = test_database("deploy-operation");
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x71; 32]));
-    let owner = address_from_public_key(&seed.public_key()).unwrap();
+    let owner = program_id_from_public_key(&seed.public_key()).unwrap();
     let mut memory = new_pow_memory();
     let mut nonce = 0;
     loop {
@@ -1682,7 +1683,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
         .state()
         .utxos()
         .coins()
-        .find(|(_, coin)| coin.owner == kernel::common::Owner::Address(owner))
+        .find(|(_, coin)| coin.owner == kernel::common::Owner::Program(owner))
         .unwrap();
     let input_amount = coin.amount.as_zeno();
     let mut code = b"XPVM".to_vec();
@@ -1818,12 +1819,12 @@ fn startup_discards_invalid_redb_mempool_entries() {
 #[test]
 fn disk_body_eviction_preserves_headers_rpc_restart_and_deep_reorg() {
     let database = test_database("disk-body-eviction");
-    let miner = Address([0xd1; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0xd1; kernel::crypto::PROGRAM_ID_SIZE]);
     let mut memory = new_pow_memory();
     let mut canonical = kernel::genesis::genesis_ledger()
         .unwrap()
         .with_applications(extension::SystemApplications);
-    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+    fn extend(ledger: &mut Ledger, miner: ProgramId, memory: &mut PoWMemory) -> Block {
         let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
         assert!(
             crate::miner::mine_range(
@@ -1850,7 +1851,7 @@ fn disk_body_eviction_preserves_headers_rpc_restart_and_deep_reorg() {
     let expected = block_response(&canonical, &old).unwrap();
     let mut damaged = old.clone();
     damaged.body_mut().emission.as_mut().unwrap().to =
-        Address([0xff; kernel::crypto::ADDRESS_SIZE]);
+        ProgramId([0xff; kernel::crypto::PROGRAM_ID_SIZE]);
     assert!(
         decode_pinned_local_body(Height(1), &old.header, &block_bytes(&damaged).unwrap())
             .unwrap_err()
@@ -1914,7 +1915,7 @@ fn disk_body_eviction_preserves_headers_rpc_restart_and_deep_reorg() {
     for _ in 0..4 {
         bodies.push(extend(
             &mut alternative,
-            Address([0xd2; kernel::crypto::ADDRESS_SIZE]),
+            ProgramId([0xd2; kernel::crypto::PROGRAM_ID_SIZE]),
             &mut memory,
         ));
     }
@@ -1957,12 +1958,12 @@ fn disk_body_eviction_preserves_headers_rpc_restart_and_deep_reorg() {
 fn scratch_recovery_replays_expired_journals_and_survives_restart() {
     let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
     let database = test_database("scratch-expired");
-    let miner = Address([0xd1; kernel::crypto::ADDRESS_SIZE]);
+    let miner = ProgramId([0xd1; kernel::crypto::PROGRAM_ID_SIZE]);
     let mut memory = new_pow_memory();
     let mut canonical = kernel::genesis::genesis_ledger()
         .unwrap()
         .with_applications(extension::SystemApplications);
-    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+    fn extend(ledger: &mut Ledger, miner: ProgramId, memory: &mut PoWMemory) -> Block {
         let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
         assert!(
             crate::miner::mine_range(
@@ -1996,7 +1997,7 @@ fn scratch_recovery_replays_expired_journals_and_survives_restart() {
     for _ in 0..4 {
         bodies.push(extend(
             &mut alternative,
-            Address([0xd2; kernel::crypto::ADDRESS_SIZE]),
+            ProgramId([0xd2; kernel::crypto::PROGRAM_ID_SIZE]),
             &mut memory,
         ));
     }
@@ -2054,7 +2055,7 @@ fn scratch_recovery_replays_expired_journals_and_survives_restart() {
     );
     assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
     let mut bad = bodies.clone();
-    bad[1].body_mut().emission.as_mut().unwrap().to = Address::ZERO;
+    bad[1].body_mut().emission.as_mut().unwrap().to = ProgramId::ZERO;
     assert!(
         super::recovery::recover_branch(
             &database,
@@ -2103,7 +2104,7 @@ fn scratch_recovery_replays_expired_journals_and_survives_restart() {
 #[test]
 fn scratch_recovery_uses_ancestor_snapshot_rechecks_work_and_rejects_invalid_state() {
     let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
-    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+    fn extend(ledger: &mut Ledger, miner: ProgramId, memory: &mut PoWMemory) -> Block {
         let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
         crate::miner::mine_range(
             &mut block,
@@ -2123,10 +2124,10 @@ fn scratch_recovery_uses_ancestor_snapshot_rechecks_work_and_rejects_invalid_sta
     let mut canonical = kernel::genesis::genesis_ledger()
         .unwrap()
         .with_applications(extension::SystemApplications);
-    extend(&mut canonical, Address::ZERO, &mut memory);
+    extend(&mut canonical, ProgramId::ZERO, &mut memory);
     let prefix = canonical.clone();
     for _ in 0..2 {
-        extend(&mut canonical, Address::ZERO, &mut memory);
+        extend(&mut canonical, ProgramId::ZERO, &mut memory);
     }
     persist_chain_and_pending(&database, &canonical, &[]).unwrap();
     crate::snapshot::write(&database, &prefix).unwrap();
@@ -2140,7 +2141,7 @@ fn scratch_recovery_uses_ancestor_snapshot_rechecks_work_and_rejects_invalid_sta
         .map(|_| {
             extend(
                 &mut alternative,
-                Address([0xe3; kernel::crypto::ADDRESS_SIZE]),
+                ProgramId([0xe3; kernel::crypto::PROGRAM_ID_SIZE]),
                 &mut memory,
             )
         })
@@ -2197,7 +2198,7 @@ fn scratch_recovery_uses_ancestor_snapshot_rechecks_work_and_rejects_invalid_sta
     // A concurrent canonical append happens while the recovery lock is held,
     // proving that replay does not hold the state mutation lock.
     let mut advanced = canonical;
-    let appended = extend(&mut advanced, Address::ZERO, &mut memory);
+    let appended = extend(&mut advanced, ProgramId::ZERO, &mut memory);
     let mut moved = false;
     let stream = bodies.iter().cloned().map(|block| {
         if !moved {
@@ -2246,7 +2247,7 @@ fn scratch_recovery_uses_ancestor_snapshot_rechecks_work_and_rejects_invalid_sta
 #[test]
 fn production_pruning_bounds_journals_and_recovers_a_deeper_valid_fork() {
     let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
-    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+    fn extend(ledger: &mut Ledger, miner: ProgramId, memory: &mut PoWMemory) -> Block {
         let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
         crate::miner::mine_range(
             &mut block,
@@ -2269,7 +2270,7 @@ fn production_pruning_bounds_journals_and_recovers_a_deeper_valid_fork() {
     persist_chain_and_pending(&database, &canonical, &[]).unwrap();
     let mut prefix = canonical.clone();
     for height in 1..=260 {
-        let block = extend(&mut canonical, Address::ZERO, &mut memory);
+        let block = extend(&mut canonical, ProgramId::ZERO, &mut memory);
         persist_block_and_pending(&database, &block, &[]).unwrap();
         let root = canonical.state_root().unwrap();
         super::journal::prune_journals(&database, &mut canonical).unwrap();
@@ -2299,7 +2300,7 @@ fn production_pruning_bounds_journals_and_recovers_a_deeper_valid_fork() {
         .map(|_| {
             extend(
                 &mut alternative,
-                Address([0xf4; kernel::crypto::ADDRESS_SIZE]),
+                ProgramId([0xf4; kernel::crypto::PROGRAM_ID_SIZE]),
                 &mut memory,
             )
         })
@@ -2347,7 +2348,7 @@ fn production_pruning_bounds_journals_and_recovers_a_deeper_valid_fork() {
 #[test]
 fn scratch_recovery_defers_if_concurrent_reorg_changes_common_ancestor() {
     let _test = super::recovery::RECOVERY_TEST_LOCK.lock().unwrap();
-    fn extend(ledger: &mut Ledger, miner: Address, memory: &mut PoWMemory) -> Block {
+    fn extend(ledger: &mut Ledger, miner: ProgramId, memory: &mut PoWMemory) -> Block {
         let mut block = super::mining::candidate_operation_block(ledger, miner, vec![]).unwrap();
         crate::miner::mine_range(
             &mut block,
@@ -2367,10 +2368,10 @@ fn scratch_recovery_defers_if_concurrent_reorg_changes_common_ancestor() {
     let mut canonical = kernel::genesis::genesis_ledger()
         .unwrap()
         .with_applications(extension::SystemApplications);
-    extend(&mut canonical, Address::ZERO, &mut memory);
+    extend(&mut canonical, ProgramId::ZERO, &mut memory);
     let prefix = canonical.clone();
     for _ in 0..2 {
-        extend(&mut canonical, Address::ZERO, &mut memory);
+        extend(&mut canonical, ProgramId::ZERO, &mut memory);
     }
     persist_chain_and_pending(&database, &canonical, &[]).unwrap();
     canonical.discard_rollback_journals_before(Height(4));
@@ -2381,7 +2382,7 @@ fn scratch_recovery_defers_if_concurrent_reorg_changes_common_ancestor() {
         .map(|_| {
             extend(
                 &mut alternative,
-                Address([0xf5; kernel::crypto::ADDRESS_SIZE]),
+                ProgramId([0xf5; kernel::crypto::PROGRAM_ID_SIZE]),
                 &mut memory,
             )
         })
@@ -2406,7 +2407,7 @@ fn scratch_recovery_defers_if_concurrent_reorg_changes_common_ancestor() {
     for _ in 0..2 {
         extend(
             &mut replacement,
-            Address([0xf6; kernel::crypto::ADDRESS_SIZE]),
+            ProgramId([0xf6; kernel::crypto::PROGRAM_ID_SIZE]),
             &mut memory,
         );
     }
@@ -2430,4 +2431,199 @@ fn scratch_recovery_defers_if_concurrent_reorg_changes_common_ancestor() {
         replacement.tip_hash()
     );
     assert_eq!(fs::read_dir(database.join("recovery")).unwrap().count(), 0);
+}
+
+#[test]
+fn chain_minimums_skip_low_claims_before_sending_header_requests() {
+    use super::chain_minimums::{ChainMinimums, configure};
+    let database = test_database("minimum-claims");
+    let before = load_or_initialize(&database).unwrap();
+    configure(
+        &database,
+        ChainMinimums {
+            work: Work::pow2(70),
+            weight: 100,
+        },
+    )
+    .unwrap();
+    let claim = cached_handshake(&database).unwrap();
+    for (work, weight) in [(Work::pow2(69), u64::MAX), (Work::MAX, 99)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let mut peer = claim.clone();
+        peer.cumulative_work = work.to_be_limbs();
+        peer.cumulative_weight = weight;
+        let sync = synchronize_headers(&database, &mut client, &peer).unwrap();
+        assert!(!sync.preferred);
+        assert!(sync.headers.is_empty());
+        drop(client);
+        // No locator or header request was written, not even a frame prefix.
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    }
+    assert_eq!(
+        load_or_initialize(&database).unwrap().tip_hash(),
+        before.tip_hash()
+    );
+    crate::storage::release_cached_database(&database);
+    fs::remove_dir_all(database).unwrap();
+}
+
+#[test]
+fn chain_minimums_do_not_trust_inflated_advertised_totals() {
+    use super::chain_minimums::{ChainMinimums, configure};
+    let database = test_database("minimum-inflated");
+    load_or_initialize(&database).unwrap();
+    configure(
+        &database,
+        ChainMinimums {
+            work: Work::pow2(70),
+            weight: 100,
+        },
+    )
+    .unwrap();
+    let mut peer = cached_handshake(&database).unwrap();
+    peer.cumulative_work = Work::MAX.to_be_limbs();
+    peer.cumulative_weight = u64::MAX;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let server = thread::spawn(move || {
+        let (mut server, _) = listener.accept().unwrap();
+        let _locator = read_frame(&mut server, 4096).unwrap();
+        let mut complete = vec![HEADERS_COMPLETE_MESSAGE];
+        complete.extend(EXPECTED_GENESIS_HASH.0);
+        write_frame(&mut server, &complete).unwrap();
+    });
+    assert!(
+        synchronize_headers(&database, &mut client, &peer)
+            .err()
+            .unwrap()
+            .contains("does not match verified headers")
+    );
+    server.join().unwrap();
+    assert_eq!(
+        load_or_initialize(&database).unwrap().tip_height(),
+        Some(Height(0))
+    );
+    crate::storage::release_cached_database(&database);
+    fs::remove_dir_all(database).unwrap();
+}
+
+#[test]
+fn chain_minimums_guard_branch_commit_and_unannounced_block_relay() {
+    use super::chain_minimums::{ChainMinimums, configure};
+    let database = test_database("minimum-commit");
+    let parent = load_or_initialize_owned(&database).unwrap();
+    let miner = ProgramId([0xc7; kernel::crypto::PROGRAM_ID_SIZE]);
+    let source = test_database("minimum-commit-source");
+    assert!(matches!(
+        mine_block_database(&source, miner, 0, 100, &mut new_pow_memory()).unwrap(),
+        MiningAttempt::Mined
+    ));
+    let block = load_or_initialize(&source)
+        .unwrap()
+        .chain
+        .block(&Height(1))
+        .unwrap()
+        .clone();
+    crate::storage::release_cached_database(&source);
+    fs::remove_dir_all(source).unwrap();
+    let (checkpoints, _, _) = build_header_state_checkpoints(&parent).unwrap();
+    let ancestor = ledger_header_state_at_height(&parent, &checkpoints, Height(0)).unwrap();
+    let header = kernel::consensus::HeaderAtHeight::new(Height(1), block.header.clone());
+    let verified = kernel::consensus::advance_header_validation_state_with_memory(
+        &ancestor,
+        &[header.clone()],
+        &mut new_pow_memory(),
+    )
+    .unwrap();
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(0),
+        ancestor_hash: EXPECTED_GENESIS_HASH,
+        headers: vec![header],
+        peer_work: verified.cumulative_work,
+        peer_weight: verified.cumulative_weight,
+        preferred: true,
+    };
+    for floor in [
+        ChainMinimums {
+            work: verified.cumulative_work.saturating_add(Work::pow2(0)),
+            weight: 0,
+        },
+        ChainMinimums {
+            work: Work::ZERO,
+            weight: verified.cumulative_weight + 1,
+        },
+    ] {
+        configure(&database, floor).unwrap();
+        // The rejected branch must not even pull its body iterator.
+        let bodies = std::iter::from_fn(|| -> Option<Result<Block, String>> {
+            panic!("below-floor body was consumed")
+        });
+        assert_eq!(
+            apply_verified_branch_stream(&database, sync.clone(), bodies).unwrap(),
+            0
+        );
+        assert!(
+            accept_relayed_block(&database, &block_bytes(&block).unwrap())
+                .unwrap_err()
+                .contains("below configured")
+        );
+        assert_eq!(
+            load_or_initialize(&database).unwrap().tip_height(),
+            Some(Height(0))
+        );
+    }
+    configure(
+        &database,
+        ChainMinimums {
+            work: verified.cumulative_work,
+            weight: verified.cumulative_weight,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        apply_verified_branch(&database, sync, vec![block]).unwrap(),
+        1
+    );
+    assert_eq!(
+        load_or_initialize(&database).unwrap().tip_height(),
+        Some(Height(1))
+    );
+    crate::storage::release_cached_database(&database);
+    fs::remove_dir_all(database).unwrap();
+}
+
+#[test]
+fn program_storage_rpc_bounds_keys_and_reports_missing_entries() {
+    let mut ledger = kernel::genesis::genesis_ledger().unwrap();
+    let mut code = b"XPVM".to_vec();
+    code.extend([4, 1, 0, 1, 0, 0, 0, 0, 0]);
+    code.push(1);
+    code.extend(0u128.to_le_bytes());
+    code.push(3);
+    let (id, _) = kernel::program::deploy_program(
+        &mut ledger.state.programs,
+        kernel::program::DeployProgram {
+            owner: ProgramId::ZERO,
+            nonce: 1,
+            code: code.into(),
+        },
+        Height(0),
+    )
+    .unwrap();
+    let prefix = format!("/program/state/{}", hex::encode(id.into_bytes()));
+    let response = explorer::program_state_response(&ledger, &format!("{prefix}/0102")).unwrap();
+    assert_eq!(response["key"], "0102");
+    assert!(response["value"].is_null());
+    assert_eq!(response["height"], 0);
+    for suffix in [
+        "".into(),
+        "zz".into(),
+        "ab".repeat(129),
+        "01/02".into(),
+        "0".into(),
+    ] {
+        assert!(explorer::program_state_response(&ledger, &format!("{prefix}/{suffix}")).is_err());
+    }
 }

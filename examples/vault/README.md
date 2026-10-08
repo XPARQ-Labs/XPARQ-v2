@@ -5,11 +5,12 @@ own coin and asset shares whenever called. Anyone can trigger the payout; the
 caller cannot change its recipient or amount. This is a fixed payout example,
 not an owner-controlled withdrawal contract.
 
-Build the bytecode using a recipient's **raw 32-byte address payload** (hex, not
-the encoded wallet address), an existing asset ID, and amounts in base units:
+Build the bytecode using the recipient's **64-character hex Program ID**,
+an existing asset ID, and amounts in base units. Wallet recipients can use
+the value printed by `wallet program-id` directly:
 
 ```bash
-python3 examples/vault/build.py --recipient-hex ADDRESS_PAYLOAD_HEX --coin-units 100000000 --asset-id ASSET_ID --asset-units 200000000 --output /tmp/vault.xpvm
+python3 examples/vault/build.py --recipient-hex PROGRAM_ID_HEX --coin-units 100000000 --asset-id ASSET_ID --asset-units 200000000 --output /tmp/vault.xpvm
 ./target/debug/wallet program-deploy --code /tmp/vault.xpvm --nonce 1 --wallet wallet.json
 ```
 

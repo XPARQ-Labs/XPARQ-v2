@@ -1,9 +1,9 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crypto::Address;
+use crypto::ProgramId;
 
-use crate::{monetary::coin::Zeno, program::ProgramId};
+use crate::monetary::coin::Zeno;
 
 pub use crypto::ChainContext;
 
@@ -54,23 +54,27 @@ pub struct Nonce(pub u64);
     Hash,
 )]
 pub enum Owner {
-    Address(Address),
     Program(ProgramId),
+}
+
+impl Owner {
+    pub const fn program(self) -> ProgramId {
+        let Self::Program(id) = self;
+        id
+    }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recipient {
-    Address(Address),
     Program(ProgramId),
     BlockMiner,
 }
 
 impl Recipient {
-    pub const fn resolve(self, block_miner: Address) -> Owner {
+    pub const fn resolve(self, block_miner: ProgramId) -> Owner {
         match self {
-            Self::Address(address) => Owner::Address(address),
             Self::Program(program) => Owner::Program(program),
-            Self::BlockMiner => Owner::Address(block_miner),
+            Self::BlockMiner => Owner::Program(block_miner),
         }
     }
 }
@@ -101,9 +105,9 @@ pub struct Output {
 }
 
 impl Output {
-    pub const fn new(to: Address, value: Value) -> Self {
+    pub const fn new(to: ProgramId, value: Value) -> Self {
         Self {
-            to: Recipient::Address(to),
+            to: Recipient::Program(to),
             value,
         }
     }
@@ -129,13 +133,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recipient_resolves_block_miner_at_application_time() {
-        let miner = Address([9; crypto::ADDRESS_SIZE]);
+    fn ownership_has_one_canonical_program_variant_for_wallets_and_contracts() {
+        let identity = ProgramId([7; crypto::PROGRAM_ID_SIZE]);
+        let owner = Owner::Program(identity);
+        assert_eq!(owner, Owner::Program(identity));
+        let bytes = borsh::to_vec(&owner).unwrap();
+        assert_eq!(bytes[0], 0);
+        assert_eq!(&bytes[1..], identity.as_bytes());
+        let mut removed_tag = bytes.clone();
+        removed_tag[0] = 1;
+        assert!(borsh::from_slice::<Owner>(&removed_tag).is_err());
+    }
 
-        assert_eq!(Recipient::BlockMiner.resolve(miner), crate::common::Owner::Address(miner));
+    #[test]
+    fn recipient_resolves_block_miner_at_application_time() {
+        let miner = ProgramId([9; crypto::PROGRAM_ID_SIZE]);
+
         assert_eq!(
-            Recipient::Address(Address::ZERO).resolve(miner),
-            crate::common::Owner::Address(Address::ZERO)
+            Recipient::BlockMiner.resolve(miner),
+            crate::common::Owner::Program(miner)
+        );
+        assert_eq!(
+            Recipient::Program(ProgramId::ZERO).resolve(miner),
+            crate::common::Owner::Program(ProgramId::ZERO)
         );
     }
 }

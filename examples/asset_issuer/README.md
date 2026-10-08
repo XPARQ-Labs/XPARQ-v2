@@ -7,10 +7,10 @@ successful call; subsequent calls mint with the next canonical nonce until the
 lifetime issuance cap is reached. Calls are public.
 
 Amounts below are base units (native assets use 8 decimals). Use the recipient's
-raw 32-byte address payload as hex:
+32-byte Program ID as hex:
 
 ```bash
-python3 examples/asset_issuer/build.py --recipient-hex ADDRESS_PAYLOAD_HEX --name LAUNCH --max-supply-units 1100000000 --initial-mint-units 100000000 --mint-units 500000000 --output /tmp/asset_issuer.xpvm
+python3 examples/asset_issuer/build.py --recipient-hex PROGRAM_ID_HEX --name LAUNCH --max-supply-units 1100000000 --initial-mint-units 100000000 --mint-units 500000000 --output /tmp/asset_issuer.xpvm
 ./target/debug/wallet program-deploy --code /tmp/asset_issuer.xpvm --nonce 1 --wallet wallet.json
 ```
 

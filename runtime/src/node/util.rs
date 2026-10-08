@@ -17,7 +17,7 @@ pub(super) fn format_work(limbs: [u64; 8]) -> String {
         .collect()
 }
 
-pub(super) fn parse_address(value: &str) -> Result<Address, String> {
-    address_from_string(value)
-        .map_err(|_| "miner address must use canonical Qx hex with an kernel checksum".to_string())
+pub(super) fn parse_program_id(value: &str) -> Result<ProgramId, String> {
+    program_id_from_string(value)
+        .map_err(|_| "program ID must contain exactly 64 hexadecimal characters".to_string())
 }

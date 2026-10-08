@@ -326,7 +326,7 @@ mod tests {
             apply_block, apply_genesis, expected_emission_for_height, expected_next_difficulty,
             new_pow_memory,
         },
-        crypto::Address,
+        crypto::ProgramId,
         genesis::genesis_block,
     };
     use std::fs;
@@ -444,7 +444,7 @@ mod tests {
                 expected_next_difficulty(&ledger.chain).unwrap(),
                 Nonce(0),
                 Some(Emission::new(
-                    Address::ZERO,
+                    ProgramId::ZERO,
                     expected_emission_for_height(height),
                 )),
                 vec![],
@@ -496,7 +496,7 @@ mod tests {
 
         let mut changed_body = blocks.clone();
         changed_body[1].body_mut().emission.as_mut().unwrap().to =
-            Address::from_bytes([1; kernel::crypto::ADDRESS_SIZE]);
+            ProgramId::from_bytes([1; kernel::crypto::PROGRAM_ID_SIZE]);
         assert!(
             load_bytes(2, &compact, &changed_body)
                 .unwrap_err()

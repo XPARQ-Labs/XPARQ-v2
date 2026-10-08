@@ -132,10 +132,19 @@ impl Ledger {
         let mut retained_count = 0_usize;
 
         let mut chain = Chain::new();
+        let mut pow_memory = None;
 
         for block in blocks {
             if verify_pow {
-                crate::consensus::validate_block_for_apply(&block, &chain)?;
+                if block.is_genesis() {
+                    crate::consensus::validate_block_for_apply(&block, &chain)?;
+                } else {
+                    crate::consensus::validate_block_for_apply_with_memory(
+                        &block,
+                        &chain,
+                        pow_memory.get_or_insert_with(crate::consensus::new_pow_memory),
+                    )?;
+                }
             } else {
                 block.validate_structure().map_err(ConsensusError::from)?;
             }
@@ -163,6 +172,7 @@ impl Ledger {
         if snapshot.journals.len() != retained_count {
             return Err(LedgerError::MissingRollbackJournal);
         }
+        drop(pow_memory);
 
         let (tip_height, tip_root) = tip.ok_or(LedgerError::EmptyChain)?;
         let ledger = Self {
@@ -325,7 +335,7 @@ impl Ledger {
                 CoinUtxo {
                     amount: emission.miner_emission(),
 
-                    owner: Owner::Address(emission.recipient()),
+                    owner: Owner::Program(emission.recipient()),
                 },
             )?;
 
@@ -376,9 +386,9 @@ impl Ledger {
 
                     journals.push(
                         state
-                            .apply_prepared_program_call(
+                            .apply_prepared_program_call_in_staged_state(
                                 prepared,
-                                block.miner_address(),
+                                block.miner_program_id(),
                                 chain_context,
                                 self.applications.executor(),
                             )
@@ -393,9 +403,9 @@ impl Ledger {
                     expected_burns = expected_burns
                         .checked_add(burn)
                         .ok_or(LedgerError::SupplyOverflow)?;
-                    journals.push(state.apply_prepared_deploy(
+                    journals.push(state.apply_prepared_deploy_in_staged_state(
                         prepared,
-                        block.miner_address(),
+                        block.miner_program_id(),
                         self.applications.executor(),
                     )?);
                 }
@@ -525,13 +535,11 @@ impl Ledger {
             return Err(LedgerError::InvalidStateRoot);
         }
 
-        let mut staged_chain = self.chain.clone();
-
-        staged_chain.insert_block(block.clone())?;
+        // All fallible insertion checks precede mutation. Execution stays staged,
+        // but committing one block no longer clones the entire chain history.
+        self.chain.insert_block(block.clone())?;
 
         self.state = executed.state;
-
-        self.chain = staged_chain;
 
         self.chain_context = Some(executed.chain_context);
 
@@ -620,7 +628,9 @@ impl ApplyBlockState for Ledger {
 //
 
 impl ProgramStateView for LedgerState {
-    fn ledger_state(&self) -> Option<&LedgerState> { Some(self) }
+    fn ledger_state(&self) -> Option<&LedgerState> {
+        Some(self)
+    }
     fn registry(&self) -> Option<&crate::program::ProgramRegistry> {
         Some(&self.programs)
     }
@@ -939,10 +949,10 @@ mod p3e_block_atomicity_tests {
             operation::{AuthorizedDeployProgram, BlockOperation},
             program::{AccountAuthorization, CoinCharges, DeployProgram},
         };
-        use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+        use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x71; 32]));
-        let owner = address_from_public_key(&seed.public_key()).unwrap();
+        let owner = program_id_from_public_key(&seed.public_key()).unwrap();
         let mut ledger = genesis::genesis_ledger().unwrap();
         commit_empty_block(&mut ledger, owner);
         let before = ledger_bytes(&ledger);
@@ -1044,7 +1054,9 @@ mod p3e_block_atomicity_tests {
                 CoinUtxo {
                     amount: Zeno::from_zeno(109),
 
-                    owner: crate::common::Owner::Address(crypto::Address([0x55; crypto::ADDRESS_SIZE])),
+                    owner: crate::common::Owner::Program(crypto::ProgramId(
+                        [0x55; crypto::PROGRAM_ID_SIZE],
+                    )),
                 },
             )
             .unwrap();
@@ -1068,7 +1080,7 @@ mod p3e_block_atomicity_tests {
         let before = ledger_bytes(&ledger);
 
         let block =
-            empty_height_one_candidate(&ledger, crypto::Address([0x56; crypto::ADDRESS_SIZE]));
+            empty_height_one_candidate(&ledger, crypto::ProgramId([0x56; crypto::PROGRAM_ID_SIZE]));
 
         let result = ledger.execute_block_with_checkpoint(&block, |point, state| {
             if point == BlockTransitionPoint::BeforeAccountingCheck {
@@ -1101,7 +1113,7 @@ mod p3e_block_atomicity_tests {
     fn pruned_snapshot_requires_a_complete_contiguous_journal_suffix() {
         let mut ledger = genesis::genesis_ledger().unwrap();
         for _ in 0..3 {
-            commit_empty_block(&mut ledger, crypto::Address::ZERO);
+            commit_empty_block(&mut ledger, crypto::ProgramId::ZERO);
         }
         let blocks = ledger.chain.blocks().cloned().collect::<Vec<_>>();
         let full = ledger.snapshot();
@@ -1138,7 +1150,7 @@ mod p3e_block_atomicity_tests {
         }
     }
 
-    fn empty_next_candidate(ledger: &Ledger, miner: crypto::Address) -> Block {
+    fn empty_next_candidate(ledger: &Ledger, miner: crypto::ProgramId) -> Block {
         let height = Height(
             ledger
                 .tip_height()
@@ -1162,7 +1174,7 @@ mod p3e_block_atomicity_tests {
         .expect("empty candidate")
     }
 
-    fn commit_empty_block(ledger: &mut Ledger, miner: crypto::Address) -> Block {
+    fn commit_empty_block(ledger: &mut Ledger, miner: crypto::ProgramId) -> Block {
         let mut block = empty_next_candidate(ledger, miner);
 
         let (state_root, block_weight) = ledger
@@ -1183,7 +1195,7 @@ mod p3e_block_atomicity_tests {
         block
     }
 
-    fn empty_height_one_candidate(ledger: &Ledger, miner: crypto::Address) -> Block {
+    fn empty_height_one_candidate(ledger: &Ledger, miner: crypto::ProgramId) -> Block {
         let previous = ledger.tip_hash().expect("genesis tip");
 
         let target_bits = expected_next_difficulty(&ledger.chain).expect("next target bits");
@@ -1204,7 +1216,7 @@ mod p3e_block_atomicity_tests {
     fn invalid_state_root_after_staging_does_not_mutate_ledger() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        let miner = crypto::Address([0x41; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x41; crypto::PROGRAM_ID_SIZE]);
 
         let before = ledger_bytes(&ledger);
 
@@ -1232,7 +1244,7 @@ mod p3e_block_atomicity_tests {
     fn committed_block_then_rollback_restores_entire_ledger_byte_for_byte() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        let miner = crypto::Address([0x42; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x42; crypto::PROGRAM_ID_SIZE]);
 
         let before = ledger_bytes(&ledger);
 
@@ -1275,13 +1287,17 @@ mod p3e_block_atomicity_tests {
     fn tampered_active_state_rejects_next_block_and_rollback_without_mutation() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        commit_empty_block(&mut ledger, crypto::Address([0x81; crypto::ADDRESS_SIZE]));
+        commit_empty_block(
+            &mut ledger,
+            crypto::ProgramId([0x81; crypto::PROGRAM_ID_SIZE]),
+        );
 
         let (coin_id, coin) = ledger.state.utxos.coins().next().expect("emission coin");
 
         let mut altered = *coin;
 
-        altered.owner = crate::common::Owner::Address(crypto::Address([0x82; crypto::ADDRESS_SIZE]));
+        altered.owner =
+            crate::common::Owner::Program(crypto::ProgramId([0x82; crypto::PROGRAM_ID_SIZE]));
 
         ledger.state.utxos.consume_coin(&coin_id).unwrap();
 
@@ -1291,7 +1307,8 @@ mod p3e_block_atomicity_tests {
 
         let before = ledger_bytes(&ledger);
 
-        let next = empty_next_candidate(&ledger, crypto::Address([0x83; crypto::ADDRESS_SIZE]));
+        let next =
+            empty_next_candidate(&ledger, crypto::ProgramId([0x83; crypto::PROGRAM_ID_SIZE]));
 
         assert!(matches!(
             ledger.preview_block_commitments(&next),
@@ -1311,7 +1328,10 @@ mod p3e_block_atomicity_tests {
     fn rollback_rejects_journal_that_preserves_supply_but_changes_parent_root() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        commit_empty_block(&mut ledger, crypto::Address([0x84; crypto::ADDRESS_SIZE]));
+        commit_empty_block(
+            &mut ledger,
+            crypto::ProgramId([0x84; crypto::PROGRAM_ID_SIZE]),
+        );
 
         let journal = &mut ledger
             .journals
@@ -1342,9 +1362,15 @@ mod p3e_block_atomicity_tests {
     fn rollback_to_non_genesis_parent_checks_parent_root() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        commit_empty_block(&mut ledger, crypto::Address([0x85; crypto::ADDRESS_SIZE]));
+        commit_empty_block(
+            &mut ledger,
+            crypto::ProgramId([0x85; crypto::PROGRAM_ID_SIZE]),
+        );
 
-        commit_empty_block(&mut ledger, crypto::Address([0x86; crypto::ADDRESS_SIZE]));
+        commit_empty_block(
+            &mut ledger,
+            crypto::ProgramId([0x86; crypto::PROGRAM_ID_SIZE]),
+        );
 
         let journal = &mut ledger
             .journals
@@ -1391,7 +1417,7 @@ mod p3e_block_atomicity_tests {
 
         let mut baseline = ledger.clone();
 
-        let miner = crypto::Address([0x91; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x91; crypto::PROGRAM_ID_SIZE]);
 
         let block = empty_next_candidate(&ledger, miner);
 
@@ -1426,9 +1452,9 @@ mod p3e_block_atomicity_tests {
 
         let genesis_tip = ledger.tip_hash();
 
-        let miner_one = crypto::Address([0x51; crypto::ADDRESS_SIZE]);
+        let miner_one = crypto::ProgramId([0x51; crypto::PROGRAM_ID_SIZE]);
 
-        let miner_two = crypto::Address([0x52; crypto::ADDRESS_SIZE]);
+        let miner_two = crypto::ProgramId([0x52; crypto::PROGRAM_ID_SIZE]);
 
         let block_one = commit_empty_block(&mut ledger, miner_one);
 
@@ -1470,9 +1496,9 @@ mod p3e_block_atomicity_tests {
     fn failed_second_block_does_not_mutate_committed_first_block() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        let miner_one = crypto::Address([0x61; crypto::ADDRESS_SIZE]);
+        let miner_one = crypto::ProgramId([0x61; crypto::PROGRAM_ID_SIZE]);
 
-        let miner_two = crypto::Address([0x62; crypto::ADDRESS_SIZE]);
+        let miner_two = crypto::ProgramId([0x62; crypto::PROGRAM_ID_SIZE]);
 
         let block_one = commit_empty_block(&mut ledger, miner_one);
 
@@ -1510,7 +1536,7 @@ mod p3e_block_atomicity_tests {
     fn invalid_block_weight_after_staging_does_not_mutate_ledger() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        let miner = crypto::Address([0x71; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x71; crypto::PROGRAM_ID_SIZE]);
 
         let before = ledger_bytes(&ledger);
 
@@ -1566,7 +1592,7 @@ mod p3e_block_atomicity_tests {
     fn invalid_next_height_is_rejected_without_mutating_ledger() {
         let ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        let miner = crypto::Address([0x72; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x72; crypto::PROGRAM_ID_SIZE]);
 
         let before = ledger_bytes(&ledger);
 
@@ -1601,7 +1627,7 @@ mod p3e_block_atomicity_tests {
     fn invalid_previous_hash_is_rejected_without_mutating_ledger() {
         let ledger = genesis::genesis_ledger().expect("genesis ledger");
 
-        let miner = crypto::Address([0x73; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x73; crypto::PROGRAM_ID_SIZE]);
 
         let before = ledger_bytes(&ledger);
 
@@ -1639,7 +1665,7 @@ mod p3e_block_atomicity_tests {
             CoinTransition, program_invocation_commitment,
         };
 
-        use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+        use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
         use crate::program::system::{
             asset_program::{
@@ -1653,9 +1679,9 @@ mod p3e_block_atomicity_tests {
 
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([24; 32]));
 
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
 
-        let miner = crypto::Address([0x82; crypto::ADDRESS_SIZE]);
+        let miner = crypto::ProgramId([0x82; crypto::PROGRAM_ID_SIZE]);
 
         let mut ledger = genesis::genesis_ledger().unwrap();
 
@@ -1676,7 +1702,7 @@ mod p3e_block_atomicity_tests {
 
             initial_mint: ExtUnit::from_units(10),
 
-            mint_authority: crate::common::Owner::Address(signer),
+            mint_authority: crate::common::Owner::Program(signer),
 
             nonce: 1,
         };
@@ -1720,7 +1746,7 @@ mod p3e_block_atomicity_tests {
             .apply(
                 &AssetCall::Register(register),
                 ExecutionContext {
- actor: crate::common::Owner::Address(signer),
+                    actor: crate::common::Owner::Program(signer),
 
                     commitment: [9; 32],
                 },
@@ -1879,7 +1905,7 @@ mod p3e_block_atomicity_tests {
             },
         };
 
-        use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+        use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
         use crate::program::system::{
             asset_program::{
@@ -1892,7 +1918,7 @@ mod p3e_block_atomicity_tests {
         };
 
         fn commit_call(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) {
-            let signer = address_from_public_key(&seed.public_key()).unwrap();
+            let signer = program_id_from_public_key(&seed.public_key()).unwrap();
 
             let chain = ledger.chain_context.unwrap();
 
@@ -1913,7 +1939,7 @@ mod p3e_block_atomicity_tests {
                 .apply(
                     &call,
                     ExecutionContext {
- actor: crate::common::Owner::Address(signer),
+                        actor: crate::common::Owner::Program(signer),
 
                         commitment: [11; 32],
                     },
@@ -1938,7 +1964,7 @@ mod p3e_block_atomicity_tests {
                 .state
                 .utxos
                 .coins()
-                .filter(|(_, v)| v.owner == crate::common::Owner::Address(signer))
+                .filter(|(_, v)| v.owner == crate::common::Owner::Program(signer))
                 .max_by_key(|(_, v)| v.amount)
                 .unwrap();
 
@@ -2028,7 +2054,7 @@ mod p3e_block_atomicity_tests {
 
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([25; 32]));
 
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
 
         let mut ledger = genesis::genesis_ledger().unwrap();
 
@@ -2046,7 +2072,7 @@ mod p3e_block_atomicity_tests {
 
                 initial_mint: ExtUnit::from_units(40),
 
-                mint_authority: crate::common::Owner::Address(signer),
+                mint_authority: crate::common::Owner::Program(signer),
 
                 nonce: 1,
             }),
@@ -2071,7 +2097,7 @@ mod p3e_block_atomicity_tests {
 
                 nonce: 1,
 
-                recipient: crate::common::Owner::Address(signer),
+                recipient: crate::common::Owner::Program(signer),
 
                 amount: ExtUnit::from_units(20),
             }),
@@ -2096,7 +2122,10 @@ mod p3e_block_atomicity_tests {
 
                 inputs,
 
-                outputs: vec![AssetOutput::new(crate::common::Owner::Address(signer), ExtUnit::from_units(60))],
+                outputs: vec![AssetOutput::new(
+                    crate::common::Owner::Program(signer),
+                    ExtUnit::from_units(60),
+                )],
             }),
         );
 

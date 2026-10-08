@@ -20,7 +20,7 @@ use crate::{
 
 use borsh::BorshSerialize;
 
-use crypto::{ADDRESS_SIZE, BlockHash, HASH_SIZE, Hash, HashDomain, domain_hash};
+use crypto::{BlockHash, HASH_SIZE, Hash, HashDomain, PROGRAM_ID_SIZE, domain_hash};
 
 // -----------------------------------------------------------------------------
 // Mainnet
@@ -67,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 3;
+pub const CHAIN_SPEC_VERSION: u32 = 6;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -103,25 +103,28 @@ struct ChainSpecIdentity<'a> {
     block_state_weight: u64,
     coin_utxo_state_weight: u64,
 
-    // Block / address / hash
+    // Block / program_id / hash
     max_block_size: u64,
     max_block_transactions: u64,
     max_transaction_size: u64,
     max_transaction_items: u64,
     block_accounting_rule: &'a str,
-    address_size: u32,
-    address_encoding: &'a str,
+    program_id_size: u32,
+    program_id_encoding: &'a str,
     hash_size: u32,
 
     // Native protocol identity
     native_coin_contract: [u8; HASH_SIZE],
     extension_asset_program: &'a str,
     transaction_format: &'a str,
+    ownership_model: &'a str,
+    monetary_call_format: &'a str,
     application_state_format: &'a str,
     vm_bytecode_format: &'a str,
     max_vm_code_size: u64,
     max_vm_stack_items: u16,
     max_vm_memory_pages: u16,
+    vm_application_limits: [u64; 11],
     vm_call_format: &'a str,
     vm_instruction_cost: u64,
     vm_memory_page_cost: u64,
@@ -132,6 +135,7 @@ struct ChainSpecIdentity<'a> {
     vm_asset_mint_cost: u64,
     max_vm_transfer_inputs: u64,
     max_vm_call_fuel: u64,
+    program_instance_derivation: &'a str,
     deploy_authorization: &'a str,
     deploy_burn_rule: &'a str,
 }
@@ -172,26 +176,41 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         block_state_weight: EMPTY_BLOCK_ARCHIVAL_BYTES,
         coin_utxo_state_weight: COIN_UTXO_STATE_WEIGHT,
 
-        // Block / address / hash
+        // Block / program_id / hash
         max_block_size: MAX_BLOCK_SIZE as u64,
         max_block_transactions: MAX_BLOCK_OPERATIONS as u64,
         max_transaction_size: MAX_PROGRAM_INVOCATION_SIZE as u64,
         max_transaction_items: MAX_PROGRAM_ITEMS as u64,
         block_accounting_rule: "coin-utxo-delta-v1",
-        address_size: ADDRESS_SIZE as u32,
-        address_encoding: "xparq-0x-sha3-checksum",
+        program_id_size: PROGRAM_ID_SIZE as u32,
+        program_id_encoding: "program-id-32-byte-hex-64",
         hash_size: HASH_SIZE as u32,
 
         // Native protocol identity
         native_coin_contract: CoinContract::derive().into_bytes(),
-        extension_asset_program: "xparq-native-xpq-and-asset-program-v2",
-        transaction_format: "owner-tagged-coin-spend-and-asset-program-v3",
-        application_state_format: "coin-utxo-extension-and-program-state-v2",
-        vm_bytecode_format: "xpvm-v1-v2-v3-program-asset-register-mint",
+        extension_asset_program: "xparq-unified-monetary-program-v1",
+        transaction_format: "program-id-principal-payment-and-monetary-v2",
+        ownership_model: "program-only-tag0-signature-policy-domain-key-hash-v2",
+        monetary_call_format: "route0-transfer1-create2-mint3-burn4-currency0coin1asset-denycoinburn-legacyassetroute1",
+        application_state_format: "program-owned-coin-asset-and-versioned-program-kv-state-v4",
+        vm_bytecode_format: "xpvm-v1-v2-v3-v4-typed-applications-metered-calls-v1",
         max_vm_code_size: crate::program::MAX_PROGRAM_CODE_SIZE as u64,
         max_vm_stack_items: crate::program::vm::MAX_STACK_ITEMS,
         max_vm_memory_pages: crate::program::vm::MAX_MEMORY_PAGES,
-        vm_call_format: "program-id-2-opcode-0-registry-id-32-v1",
+        vm_application_limits: [
+            crate::program::vm_app::MAX_DATA_BYTES as u64,
+            crate::program::vm_app::MAX_KEY_BYTES as u64,
+            crate::program::vm_app::MAX_STORAGE_ENTRIES as u64,
+            crate::program::vm_app::MAX_STORAGE_BYTES as u64,
+            crate::program::vm_app::MAX_CALL_DEPTH as u64,
+            crate::program::vm_app::MAX_CALLS as u64,
+            crate::program::vm_app::MAX_ACTIONS as u64,
+            crate::program::vm_app::CALL_COST,
+            crate::program::vm::APPLICATION_VERSION as u64,
+            crate::program::vm_app::MAX_CODE_BYTES as u64,
+            crate::program::vm_app::MAX_INSTRUCTIONS as u64,
+        ],
+        vm_call_format: "program-id-2-opcode-0-id-or-opcode-1-id-data-v2",
         vm_instruction_cost: crate::program::vm::INSTRUCTION_COST,
         vm_memory_page_cost: crate::program::vm::MEMORY_PAGE_COST,
         vm_state_read_cost: crate::program::vm::STATE_READ_COST,
@@ -201,6 +220,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         vm_asset_mint_cost: crate::program::vm::ASSET_MINT_COST,
         max_vm_transfer_inputs: crate::program::vm_transfer::MAX_TRANSFER_INPUTS as u64,
         max_vm_call_fuel: crate::program::vm::MAX_CALL_FUEL,
+        program_instance_derivation: "xparq:program-id:v2-program-principal-nonce-code-hash",
         deploy_authorization: "xparq:deploy-program:v1",
         deploy_burn_rule: "operation-bytes-plus-registry-growth-v1",
     };
@@ -214,11 +234,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 3);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 6);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                79, 165, 224, 18, 171, 213, 168, 54, 153, 255, 224, 192, 8, 227, 194, 122, 254, 205, 107, 90, 232, 190, 179, 111, 147, 60, 108, 166, 46, 221, 30, 174
+                125, 174, 223, 82, 40, 139, 129, 209, 167, 89, 59, 232, 78, 150, 165, 169, 229,
+                147, 30, 144, 196, 183, 169, 4, 114, 53, 122, 228, 62, 25, 244, 217
             ]
         );
     }

@@ -2,7 +2,7 @@ use std::{error::Error, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
-    InvalidAddressEncoding,
+    InvalidProgramIdEncoding,
     InvalidKeyDerivationParameters,
     InvalidPublicKey,
     InvalidPublicKeyLength,
@@ -16,7 +16,9 @@ pub enum CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidAddressEncoding => f.write_str("address string is invalid"),
+            Self::InvalidProgramIdEncoding => {
+                f.write_str("program ID must contain 64 hexadecimal characters")
+            }
             Self::InvalidKeyDerivationParameters => {
                 f.write_str("key derivation parameters are invalid")
             }

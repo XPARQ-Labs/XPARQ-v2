@@ -9,6 +9,21 @@ pub(super) fn synchronize_headers(
     let (ledger, header_checkpoints, local_cumulative_work, local_cumulative_weight) =
         load_or_initialize_header_snapshot(database)?;
 
+    let minimums = super::chain_minimums::configured(database)?;
+    if !minimums.allows(
+        Work::from_be_limbs(peer.cumulative_work),
+        peer.cumulative_weight,
+    ) {
+        println!("sync: ignoring advertised chain below configured work/weight minimums");
+        return Ok(HeaderSyncResult {
+            ancestor_height: ledger.tip_height().ok_or("local chain has no tip")?,
+            ancestor_hash: ledger.tip_hash().ok_or("local chain has no tip")?,
+            headers: Vec::new(),
+            peer_work: Work::from_be_limbs(peer.cumulative_work),
+            peer_weight: peer.cumulative_weight,
+            preferred: false,
+        });
+    }
     let local_locator = ledger_header_locator(&ledger)?;
 
     let mut validation_state = None;
@@ -66,15 +81,16 @@ pub(super) fn synchronize_headers(
             let peer_work = state.cumulative_work;
             let peer_weight = state.cumulative_weight;
 
-            let preferred = compare_chain_tips(
-                peer_work,
-                peer_weight,
-                BlockHash(peer.tip_hash),
-                local_cumulative_work,
-                local_cumulative_weight,
-                BlockHash(local_hash),
-            )
-            .is_gt();
+            let preferred = minimums.allows(peer_work, peer_weight)
+                && compare_chain_tips(
+                    peer_work,
+                    peer_weight,
+                    BlockHash(peer.tip_hash),
+                    local_cumulative_work,
+                    local_cumulative_weight,
+                    BlockHash(local_hash),
+                )
+                .is_gt();
 
             return Ok(HeaderSyncResult {
                 ancestor_height: ancestor_height.unwrap_or(state.height),
@@ -221,6 +237,10 @@ pub(super) fn apply_verified_branch_stream<I>(
 where
     I: Iterator<Item = Result<Block, String>>,
 {
+    if !super::chain_minimums::allows(database, sync.peer_work, sync.peer_weight)? {
+        println!("sync: ignoring verified branch below configured work/weight minimums");
+        return Ok(0);
+    }
     let count = sync.headers.len();
     let new_tip = sync
         .headers
@@ -315,6 +335,7 @@ where
         .map_err(|error| error.to_string())?;
     let mut included = BTreeSet::new();
     let mut previous = sync.ancestor_hash;
+    let mut pow_memory = None;
     for expected in &sync.headers {
         let block = blocks
             .next()
@@ -336,8 +357,12 @@ where
                     .into_bytes(),
             );
         }
-        apply_block(&mut staged, block)
-            .map_err(|error| format!("apply synchronized block: {error}"))?;
+        kernel::consensus::apply_block_with_pow_memory(
+            &mut staged,
+            block,
+            pow_memory.get_or_insert_with(new_pow_memory),
+        )
+        .map_err(|error| format!("apply synchronized block: {error}"))?;
         super::journal::prune_journals(database, &mut staged)?;
     }
     if blocks.next().is_some() {
@@ -346,6 +371,7 @@ where
     if staged.tip_hash() != Some(new_tip) {
         return Err("applied branch does not reach the verified tip".into());
     }
+    drop(pow_memory);
     let mut mempool_candidates = disconnected_operations;
     mempool_candidates.extend(read_pending_operations(database)?);
     let mempool = reconcile_pending_operations(&staged, mempool_candidates, &included);

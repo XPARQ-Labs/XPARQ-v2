@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, io::Read};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
+use crypto::{ProgramId, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crypto::ChainContext;
 
@@ -45,7 +45,7 @@ impl CoinCharges {
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct CoinTransition {
-    pub signer: Address,
+    pub signer: ProgramId,
     pub inputs: Vec<CoinShare>,
     pub outputs: Vec<CoinOutput>,
     pub charges: CoinCharges,
@@ -54,7 +54,7 @@ pub struct CoinTransition {
 impl BorshDeserialize for CoinTransition {
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         Ok(Self {
-            signer: Address::deserialize_reader(reader)?,
+            signer: ProgramId::deserialize_reader(reader)?,
             inputs: deserialize_bounded_vec(reader, MAX_PROGRAM_ITEMS)?,
             outputs: deserialize_bounded_vec(reader, MAX_PROGRAM_ITEMS)?,
             charges: CoinCharges::deserialize_reader(reader)?,
@@ -64,7 +64,7 @@ impl BorshDeserialize for CoinTransition {
 
 impl CoinTransition {
     pub fn coin(
-        signer: Address,
+        signer: ProgramId,
         inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
     ) -> Result<Self, IntentError> {
@@ -72,7 +72,7 @@ impl CoinTransition {
     }
 
     pub fn coin_with_charges(
-        signer: Address,
+        signer: ProgramId,
         inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
         charges: CoinCharges,
@@ -146,8 +146,8 @@ mod conservation_tests {
     use crate::monetary::coin::{CoinOutput, CoinShare, Zeno};
     use crypto::HASH16_SIZE;
 
-    fn address(byte: u8) -> Address {
-        Address([byte; crypto::ADDRESS_SIZE])
+    fn program_id(byte: u8) -> ProgramId {
+        ProgramId([byte; crypto::PROGRAM_ID_SIZE])
     }
 
     #[test]
@@ -155,9 +155,9 @@ mod conservation_tests {
         let input = CoinShare::from_bytes([0x11; HASH16_SIZE]);
 
         let result = CoinTransition::coin(
-            address(1),
+            program_id(1),
             vec![input, input],
-            vec![CoinOutput::new(address(2), Zeno::from_zeno(1))],
+            vec![CoinOutput::new(program_id(2), Zeno::from_zeno(1))],
         );
 
         assert!(matches!(result, Err(IntentError::DuplicateInput)));
@@ -168,9 +168,9 @@ mod conservation_tests {
         let input = CoinShare::from_bytes([0x44; HASH16_SIZE]);
 
         let result = CoinTransition::coin(
-            address(1),
+            program_id(1),
             vec![input],
-            vec![CoinOutput::new(address(2), Zeno::ZERO)],
+            vec![CoinOutput::new(program_id(2), Zeno::ZERO)],
         );
 
         assert!(matches!(result, Err(IntentError::ZeroAmount)));

@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use super::*;
 use super::{config::*, gossip::*, mempool::*, state::*, util::*};
 
-pub(super) fn mining_loop(database: PathBuf, miner: Address) {
+pub(super) fn mining_loop(database: PathBuf, miner: ProgramId) {
     let mut next_nonce = 0_u64;
     let mut memory = new_pow_memory();
     println!("mining_state: ready");
@@ -26,7 +26,7 @@ pub(super) enum MiningAttempt {
 
 pub(super) fn mine_block_database(
     database: &Path,
-    miner: Address,
+    miner: ProgramId,
     start_nonce: u64,
     attempts: u64,
     memory: &mut PoWMemory,
@@ -144,7 +144,7 @@ fn print_mined_block(block: &Block, state_burn: u64) {
 
 pub(super) fn mine_one_block(path: Option<&str>, miner: &str) -> Result<(), String> {
     let database = database_path(path);
-    let miner = parse_address(miner)?;
+    let miner = parse_program_id(miner)?;
     let mut next_nonce = 0_u64;
     let mut memory = new_pow_memory();
     loop {
@@ -157,7 +157,7 @@ pub(super) fn mine_one_block(path: Option<&str>, miner: &str) -> Result<(), Stri
 
 pub(super) fn select_block_operations(
     ledger: &Ledger,
-    miner: Address,
+    miner: ProgramId,
     mempool: &[kernel::operation::BlockOperation],
 ) -> Result<Vec<kernel::operation::BlockOperation>, String> {
     let mut selected = Vec::new();
@@ -175,7 +175,7 @@ pub(super) fn select_block_operations(
 
 pub(super) fn candidate_operation_block(
     ledger: &Ledger,
-    miner: Address,
+    miner: ProgramId,
     operations: Vec<kernel::operation::BlockOperation>,
 ) -> Result<Block, String> {
     let height = Height(

@@ -67,7 +67,7 @@ fn apply_pending_operation(
             state
                 .apply_program_call_with_applications(
                     (**call).clone(),
-                    Address::ZERO,
+                    ProgramId::ZERO,
                     chain,
                     height.0,
                     &extension::SystemApplications,
@@ -78,7 +78,7 @@ fn apply_pending_operation(
             state
                 .apply_deploy_with_applications(
                     (**deploy).clone(),
-                    Address::ZERO,
+                    ProgramId::ZERO,
                     chain,
                     height,
                     &extension::SystemApplications,
@@ -366,7 +366,7 @@ pub(super) fn persist_block_and_pending(
             .map(|transaction| transaction.id().map_err(|error| error.to_string()))
             .collect::<Result<Vec<_>, _>>()?,
 
-        activities: super::index::stored_address_activities(block)?,
+        activities: super::index::stored_program_activities(block)?,
     };
 
     crate::storage::append_block_and_replace_mempool(
@@ -416,7 +416,7 @@ pub(super) fn persist_chain_and_pending_from_store_with_snapshot(
                 transactions: block_program_transactions(&block)
                     .map(|transaction| transaction.id().map_err(|error| error.to_string()))
                     .collect::<Result<Vec<_>, String>>()?,
-                activities: super::index::stored_address_activities(&block)?,
+                activities: super::index::stored_program_activities(&block)?,
             })
         })
     };

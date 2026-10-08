@@ -67,16 +67,24 @@ where
     let checkpoints = build_header_state_checkpoints(&captured)?.0;
     let ancestor_state =
         ledger_header_state_at_height(&captured, &checkpoints, sync.ancestor_height)?;
+    let mut pow_memory = new_pow_memory();
     let verified = kernel::consensus::advance_header_validation_state_with_memory(
         &ancestor_state,
         &sync.headers,
-        &mut new_pow_memory(),
+        &mut pow_memory,
     )
     .map_err(map_peer_header_error)?;
     let tip = verified.header.hash().map_err(|error| error.to_string())?;
     if verified.cumulative_work != sync.peer_work || verified.cumulative_weight != sync.peer_weight
     {
         return Err("recovery candidate work does not match validated headers".into());
+    }
+    if !super::chain_minimums::allows(
+        database,
+        verified.cumulative_work,
+        verified.cumulative_weight,
+    )? {
+        return Ok(0);
     }
     let scratch = Scratch::new(database)?;
     // Snapshots are local caches. An unusable cache falls back to full genesis replay.
@@ -115,8 +123,12 @@ where
                 kernel::consensus::apply_genesis(&mut staged, block.clone(), EXPECTED_GENESIS_HASH)
                     .map_err(|error| format!("recovery genesis: {error}"))?;
             } else {
-                apply_block(&mut staged, block.clone())
-                    .map_err(|error| format!("recovery local replay: {error}"))?;
+                kernel::consensus::apply_block_with_pow_memory(
+                    &mut staged,
+                    block.clone(),
+                    &mut pow_memory,
+                )
+                .map_err(|error| format!("recovery local replay: {error}"))?;
             }
         }
         super::journal::copy_receipt(database, &scratch.0, &captured, &block)?;
@@ -148,7 +160,11 @@ where
         block
             .validate_structure()
             .map_err(|error| format!("invalid recovery body: {error}"))?;
-        if let Err(error) = apply_block(&mut staged, block.clone()) {
+        if let Err(error) = kernel::consensus::apply_block_with_pow_memory(
+            &mut staged,
+            block.clone(),
+            &mut pow_memory,
+        ) {
             let mut invalid = INVALID_CANDIDATES
                 .lock()
                 .map_err(|_| "recovery history lock is poisoned")?;
@@ -168,6 +184,7 @@ where
     if blocks.next().is_some() || staged.tip_hash() != Some(tip) {
         return Err("recovery candidate does not reach validated tip".into());
     }
+    drop(pow_memory);
     // Persist the fully validated execution state in the isolated database too.
     crate::snapshot::write(&scratch.0, &staged)?;
     let checkpoint = crate::storage::snapshots_descending(&scratch.0)?

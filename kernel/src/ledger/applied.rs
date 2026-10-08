@@ -5,7 +5,7 @@ use crate::{
     program::{AuthorizationCommitment, CoinTransition},
 };
 
-use crypto::Address;
+use crypto::ProgramId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 
@@ -33,19 +33,27 @@ mod vm_state_call_tests {
             program_invocation_commitment,
         },
     };
-    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key, canonical_bytes};
+    use crypto::{
+        AccountSignatureScheme, SigningSeed, canonical_bytes, program_id_from_public_key,
+    };
 
     #[test]
     fn vm_state_call_updates_root_and_rolls_back_with_coin_payment() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x53; 32]));
-        let owner = address_from_public_key(&seed.public_key()).unwrap();
+        let owner = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([0x91; crypto::HASH_SIZE]);
         let mut state = LedgerState::default();
         let input = CoinShare::from_bytes([0x23; crypto::HASH16_SIZE]);
         let amount = Zeno::from_zeno(1_000_000);
         state
             .utxos
-            .insert_coin(input, CoinUtxo { amount, owner: crate::common::Owner::Address(owner) })
+            .insert_coin(
+                input,
+                CoinUtxo {
+                    amount,
+                    owner: crate::common::Owner::Program(owner),
+                },
+            )
             .unwrap();
         state.coin.total_mined = amount;
         let mut code = b"XPVM".to_vec();
@@ -134,7 +142,7 @@ impl LedgerState {
 
         commitment: AuthorizationCommitment,
 
-        block_miner: Address,
+        block_miner: ProgramId,
     ) -> Result<CoinRollbackJournal, StateError> {
         self.execute_coin_program_with_applications(
             intent,
@@ -148,7 +156,7 @@ impl LedgerState {
         &mut self,
         intent: &CoinTransition,
         commitment: AuthorizationCommitment,
-        block_miner: Address,
+        block_miner: ProgramId,
         applications: &dyn crate::program::application::ApplicationExecutor,
     ) -> Result<CoinRollbackJournal, StateError> {
         self.execute_coin_program_with_checkpoint_and_applications(
@@ -168,7 +176,7 @@ impl LedgerState {
 
         commitment: AuthorizationCommitment,
 
-        block_miner: Address,
+        block_miner: ProgramId,
 
         checkpoint: impl FnMut(TransitionPoint) -> Result<(), StateError>,
     ) -> Result<CoinRollbackJournal, StateError> {
@@ -185,7 +193,7 @@ impl LedgerState {
         &mut self,
         intent: &CoinTransition,
         commitment: AuthorizationCommitment,
-        block_miner: Address,
+        block_miner: ProgramId,
         mut checkpoint: impl FnMut(TransitionPoint) -> Result<(), StateError>,
         applications: &dyn crate::program::application::ApplicationExecutor,
     ) -> Result<CoinRollbackJournal, StateError> {
@@ -279,7 +287,7 @@ impl LedgerState {
 struct KernelCoinHost<'a, F> {
     allowed_inputs: &'a std::collections::BTreeSet<CoinShare>,
     outputs: &'a [(Owner, u64)],
-    miner: Address,
+    miner: ProgramId,
     miner_fee: u64,
     expected_burn: u64,
     state: &'a mut LedgerState,
@@ -324,7 +332,7 @@ impl<F: FnMut(TransitionPoint) -> Result<(), StateError>>
         let expected = if let Some(output) = self.outputs.get(index as usize) {
             *output
         } else if index as usize == self.outputs.len() && self.miner_fee != 0 {
-            (Owner::Address(self.miner), self.miner_fee)
+            (Owner::Program(self.miner), self.miner_fee)
         } else {
             return Err(StateError::InvalidTransition);
         };
@@ -482,7 +490,7 @@ impl LedgerState {
     pub fn apply_deploy(
         &mut self,
         signed: crate::operation::AuthorizedDeployProgram,
-        miner: Address,
+        miner: ProgramId,
         chain: crate::common::ChainContext,
         height: crate::common::Height,
     ) -> Result<StateRollbackJournal, super::LedgerError> {
@@ -498,7 +506,7 @@ impl LedgerState {
     pub fn apply_deploy_with_applications(
         &mut self,
         signed: crate::operation::AuthorizedDeployProgram,
-        miner: Address,
+        miner: ProgramId,
         chain: crate::common::ChainContext,
         height: crate::common::Height,
         applications: &dyn crate::program::application::ApplicationExecutor,
@@ -510,18 +518,31 @@ impl LedgerState {
     pub(crate) fn apply_prepared_deploy(
         &mut self,
         prepared: crate::consensus::PreparedDeploy,
-        miner: Address,
+        miner: ProgramId,
         applications: &dyn crate::program::application::ApplicationExecutor,
     ) -> Result<StateRollbackJournal, super::LedgerError> {
         let mut staged = self.clone();
-        let coin = staged.execute_coin_program_with_applications(
+        let journal =
+            staged.apply_prepared_deploy_in_staged_state(prepared, miner, applications)?;
+        *self = staged;
+        Ok(journal)
+    }
+
+    /// The caller must discard this private staging state on any error.
+    pub(crate) fn apply_prepared_deploy_in_staged_state(
+        &mut self,
+        prepared: crate::consensus::PreparedDeploy,
+        miner: ProgramId,
+        applications: &dyn crate::program::application::ApplicationExecutor,
+    ) -> Result<StateRollbackJournal, super::LedgerError> {
+        let coin = self.execute_coin_program_with_applications(
             &prepared.signed.payment,
             prepared.commitment,
             miner,
             applications,
         )?;
         let (id, program) = crate::program::deploy_program(
-            &mut staged.programs,
+            &mut self.programs,
             prepared.signed.deploy,
             prepared.height,
         )
@@ -529,8 +550,7 @@ impl LedgerState {
         if id != prepared.program_id {
             return Err(StateError::InvalidTransition.into());
         }
-        staged.validate_supply_invariants()?;
-        *self = staged;
+        self.validate_supply_invariants()?;
         Ok(StateRollbackJournal {
             coin: Some(coin),
             program: Some(program),
@@ -545,7 +565,7 @@ impl LedgerState {
 
         transaction: crate::program::AuthorizedProgramInvocation,
 
-        miner: Address,
+        miner: ProgramId,
 
         chain: crate::common::ChainContext,
 
@@ -563,7 +583,7 @@ impl LedgerState {
     pub fn apply_program_call_with_applications(
         &mut self,
         transaction: crate::program::AuthorizedProgramInvocation,
-        miner: Address,
+        miner: ProgramId,
         chain: crate::common::ChainContext,
         height: u64,
         applications: &dyn crate::program::application::ApplicationExecutor,
@@ -582,13 +602,31 @@ impl LedgerState {
     pub(crate) fn apply_prepared_program_call(
         &mut self,
         prepared: crate::program::PreparedProgramInvocation,
-        miner: Address,
+        miner: ProgramId,
         chain: crate::common::ChainContext,
         applications: &dyn crate::program::application::ApplicationExecutor,
     ) -> Result<StateRollbackJournal, super::LedgerError> {
-        let tx = prepared.invocation;
-
         let mut staged = self.clone();
+        let journal = staged.apply_prepared_program_call_in_staged_state(
+            prepared,
+            miner,
+            chain,
+            applications,
+        )?;
+        *self = staged;
+        Ok(journal)
+    }
+
+    /// The caller must discard this private staging state on any error.
+    pub(crate) fn apply_prepared_program_call_in_staged_state(
+        &mut self,
+        prepared: crate::program::PreparedProgramInvocation,
+        miner: ProgramId,
+        chain: crate::common::ChainContext,
+        applications: &dyn crate::program::application::ApplicationExecutor,
+    ) -> Result<StateRollbackJournal, super::LedgerError> {
+        let height = prepared.height;
+        let tx = prepared.invocation;
 
         let commitment =
             crate::program::program_invocation_commitment(tx.signer, &tx.call, &tx.payment, chain)
@@ -604,30 +642,12 @@ impl LedgerState {
                 }
 
                 crate::program::system::script::execute::DecodedProgramCall::Vm(id) => {
-                    let id = crate::program::ProgramId::from_bytes(id);
-                    let result = crate::program::vm::execute_registered(
-                        &staged.programs,
-                        id,
-                        crate::program::vm::MAX_CALL_FUEL,
-                    )
-                    .map_err(|_| StateError::InvalidTransition)?;
-                    let (transfer_coin, transfer_asset) = crate::program::vm_transfer::settle(
-                        &mut staged, id, &result, commitment, applications)?;
-                    vm_coin = transfer_coin;
-                    let journal = match result.proposed_effect {
-                        Some(crate::program::vm::VmEffect::ProgramState(value)) => {
-                            let previous = staged
-                                .programs
-                                .set_state(id, value)
-                                .ok_or(StateError::InvalidTransition)?;
-                            Some(crate::program::ProgramJournal::State {
-                                program_id: id,
-                                previous,
-                            })
-                        }
-                        None => None,
-                    };
-                    (transfer_asset, journal)
+                    let _ = id;
+                    let result =
+                        crate::program::vm_app::apply(self, &tx, height, commitment, applications)
+                            .map_err(|_| StateError::InvalidTransition)?;
+                    vm_coin = result.coin;
+                    (result.asset, result.program)
                 }
 
                 crate::program::system::script::execute::DecodedProgramCall::Asset(call) => {
@@ -640,10 +660,10 @@ impl LedgerState {
 
                     let journal = crate::program::asset_host::execute_asset(
                         applications,
-                        &mut staged.extensions.assets,
+                        &mut self.extensions.assets,
                         &call,
                         crate::program::system::asset_program::state::ExecutionContext {
-                            actor: Owner::Address(tx.signer),
+                            actor: Owner::Program(tx.signer),
 
                             commitment: crypto::domain(crypto::HashDomain::AssetIntent, &bytes)
                                 .into_bytes(),
@@ -655,7 +675,7 @@ impl LedgerState {
                 }
             };
 
-        let mut coin = staged.execute_coin_program_with_applications(
+        let mut coin = self.execute_coin_program_with_applications(
             &tx.payment,
             commitment,
             miner,
@@ -665,9 +685,7 @@ impl LedgerState {
         coin.consumed_coins.append(&mut vm_coin.consumed_coins);
         coin.created_coin_ids.append(&mut vm_coin.created_coin_ids);
 
-        staged.validate_supply_invariants()?;
-
-        *self = staged;
+        self.validate_supply_invariants()?;
 
         Ok(StateRollbackJournal {
             coin: Some(coin),
@@ -689,14 +707,14 @@ mod coin_atomicity_tests {
 
     use crypto::HASH_SIZE;
 
-    fn address(byte: u8) -> Address {
-        Address([byte; crypto::ADDRESS_SIZE])
+    fn program_id(byte: u8) -> ProgramId {
+        ProgramId([byte; crypto::PROGRAM_ID_SIZE])
     }
 
     #[test]
 
     fn coin_coin_failure_after_each_mutation_restores_state_and_retry_root() {
-        let owner = address(1);
+        let owner = program_id(1);
 
         let input = CoinShare::from_bytes([3; crypto::HASH16_SIZE]);
 
@@ -711,7 +729,7 @@ mod coin_atomicity_tests {
                 CoinUtxo {
                     amount: Zeno::from_zeno(100),
 
-                    owner: crate::common::Owner::Address(owner),
+                    owner: crate::common::Owner::Program(owner),
                 },
             )
             .unwrap();
@@ -719,7 +737,7 @@ mod coin_atomicity_tests {
         let intent = CoinTransition::coin_with_charges(
             owner,
             vec![input],
-            vec![CoinOutput::new(address(2), Zeno::from_zeno(70))],
+            vec![CoinOutput::new(program_id(2), Zeno::from_zeno(70))],
             CoinCharges::new(Zeno::from_zeno(10)),
         )
         .unwrap();
@@ -729,7 +747,7 @@ mod coin_atomicity_tests {
         let mut expected = original.clone();
 
         expected
-            .execute_coin_program(&intent, commitment, address(9))
+            .execute_coin_program(&intent, commitment, program_id(9))
             .unwrap();
 
         let expected_bytes = borsh::to_vec(&expected).unwrap();
@@ -746,7 +764,7 @@ mod coin_atomicity_tests {
                 state.execute_coin_program_with_checkpoint(
                     &intent,
                     commitment,
-                    address(9),
+                    program_id(9),
                     |seen| if seen == point {
                         Err(StateError::InvalidTransition)
                     } else {
@@ -759,7 +777,7 @@ mod coin_atomicity_tests {
             assert_eq!(state, original, "failure at {point:?}");
 
             state
-                .execute_coin_program(&intent, commitment, address(9))
+                .execute_coin_program(&intent, commitment, program_id(9))
                 .unwrap();
 
             assert_eq!(borsh::to_vec(&state).unwrap(), expected_bytes);

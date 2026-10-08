@@ -14,7 +14,7 @@ fn node_restarts_from_a_compact_snapshot() {
             apply_block, apply_genesis, expected_emission_for_height, expected_next_difficulty,
             new_pow_memory, validate_emission,
         },
-        crypto::Address,
+        crypto::ProgramId,
         genesis::{EXPECTED_GENESIS_HASH, genesis_block},
         ledger::Ledger,
         monetary::coin::CoinShare,
@@ -39,7 +39,7 @@ fn node_restarts_from_a_compact_snapshot() {
         expected_next_difficulty(&ledger.chain).unwrap(),
         Nonce(0),
         Some(Emission::new(
-            Address::ZERO,
+            ProgramId::ZERO,
             expected_emission_for_height(height),
         )),
         vec![],
@@ -139,7 +139,7 @@ fn node_restarts_from_a_compact_snapshot() {
         block.header.target_bits,
         Nonce(block.header.nonce.0 + 1),
         Some(Emission::new(
-            Address::from_bytes([1; kernel::crypto::ADDRESS_SIZE]),
+            ProgramId::from_bytes([1; kernel::crypto::PROGRAM_ID_SIZE]),
             expected_emission_for_height(height),
         )),
         vec![],

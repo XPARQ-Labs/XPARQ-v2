@@ -1,16 +1,15 @@
-pub mod address;
 pub mod agility;
 pub mod argon2;
 pub mod codec;
 mod error;
 pub mod hash;
+pub mod program_id;
 pub mod signature;
 
 pub mod crypto {
     pub use crate::*;
 }
 
-pub use address::*;
 pub use agility::*;
 pub use argon2::*;
 pub use codec::{
@@ -19,6 +18,7 @@ pub use codec::{
 };
 pub use error::CryptoError;
 pub use hash::*;
+pub use program_id::*;
 pub use signature::*;
 
 #[derive(

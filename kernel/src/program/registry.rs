@@ -3,52 +3,11 @@ use std::io::{Error, ErrorKind, Read};
 use std::sync::Arc;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
-use serde::{Deserialize, Serialize};
+use crypto::{HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::common::Height;
 
-/// Hash identifying deployed code in the registry, distinct from SystemProgramId routes.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    BorshSerialize,
-    BorshDeserialize,
-    Serialize,
-    Deserialize,
-)]
-pub struct ProgramId([u8; HASH_SIZE]);
-
-impl ProgramId {
-    pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
-        &self.0
-    }
-
-    pub const fn into_bytes(self) -> [u8; HASH_SIZE] {
-        self.0
-    }
-
-    pub fn derive(
-        owner: Address,
-        nonce: u64,
-        code_hash: ProgramHash,
-    ) -> Result<Self, RegistryError> {
-        let bytes = canonical_bytes(&(b"xparq:program-id:v1", owner, nonce, code_hash))
-            .map_err(|_| RegistryError::Encoding)?;
-
-        Ok(Self(domain(HashDomain::XPARQArtifact, &bytes).into_bytes()))
-    }
-}
+pub use crypto::ProgramId;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -76,26 +35,51 @@ impl ProgramHash {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramRecord {
     pub code_hash: ProgramHash,
     /// Shared code bytes; canonical encoding remains the historical Vec encoding.
     pub code: Arc<Vec<u8>>,
-    pub owner: Address,
+    /// Deployment key identity, not authority to spend this program's balances.
+    pub owner: ProgramId,
     pub nonce: u64,
     pub deployed_at: Height,
     pub state_value: i64,
+    pub storage: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl BorshSerialize for ProgramRecord {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        BorshSerialize::serialize(&self.code_hash, writer)?;
+        BorshSerialize::serialize(&self.code, writer)?;
+        BorshSerialize::serialize(&self.owner, writer)?;
+        BorshSerialize::serialize(&self.nonce, writer)?;
+        BorshSerialize::serialize(&self.deployed_at, writer)?;
+        BorshSerialize::serialize(&self.state_value, writer)?;
+        if self.code.get(4) == Some(&super::vm::APPLICATION_VERSION) {
+            BorshSerialize::serialize(&self.storage, writer)?;
+        }
+        Ok(())
+    }
 }
 
 impl BorshDeserialize for ProgramRecord {
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        let code_hash = ProgramHash::deserialize_reader(reader)?;
+        let code: Arc<Vec<u8>> = super::deserialize_program_code(reader)?.into();
+        let version = code.get(4).copied();
         Ok(Self {
-            code_hash: ProgramHash::deserialize_reader(reader)?,
-            code: super::deserialize_program_code(reader)?.into(),
-            owner: Address::deserialize_reader(reader)?,
+            code_hash,
+            code,
+            owner: ProgramId::deserialize_reader(reader)?,
             nonce: u64::deserialize_reader(reader)?,
             deployed_at: Height::deserialize_reader(reader)?,
             state_value: i64::deserialize_reader(reader)?,
+            storage: if version == Some(super::vm::APPLICATION_VERSION) {
+                super::vm_app::read_storage(reader)?
+            } else {
+                BTreeMap::new()
+            },
         })
     }
 }
@@ -105,7 +89,7 @@ pub struct ProgramRegistry {
     programs: BTreeMap<ProgramId, ProgramRecord>,
     // Derived lookup data must never affect canonical state bytes.
     #[borsh(skip)]
-    deployments: BTreeSet<(Address, u64)>,
+    deployments: BTreeSet<(ProgramId, u64)>,
 }
 
 impl BorshDeserialize for ProgramRegistry {
@@ -163,7 +147,7 @@ impl ProgramRegistry {
     pub(crate) fn check_available(
         &self,
         id: ProgramId,
-        owner: Address,
+        owner: ProgramId,
         nonce: u64,
     ) -> Result<(), RegistryError> {
         if self.contains(&id) || self.deployments.contains(&(owner, nonce)) {
@@ -180,6 +164,12 @@ impl ProgramRegistry {
         }
         .validate_structure()
         .map_err(|_| RegistryError::InvalidRecord)?;
+        if !super::vm_app::valid_storage(&record.storage)
+            || (record.code.get(4) != Some(&super::vm::APPLICATION_VERSION)
+                && !record.storage.is_empty())
+        {
+            return Err(RegistryError::InvalidRecord);
+        }
         let hash = ProgramHash::derive(&record.code)?;
         if hash != record.code_hash || ProgramId::derive(record.owner, record.nonce, hash)? != id {
             return Err(RegistryError::InvalidRecord);
@@ -210,6 +200,27 @@ impl ProgramRegistry {
         self.programs.is_empty()
     }
 
+    pub(crate) fn set_storage(
+        &mut self,
+        id: ProgramId,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> Result<(), RegistryError> {
+        let record = self
+            .programs
+            .get_mut(&id)
+            .ok_or(RegistryError::InvalidRecord)?;
+        match value {
+            Some(value) => {
+                record.storage.insert(key, value);
+            }
+            None => {
+                record.storage.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_state(&mut self, id: ProgramId, value: i64) -> Option<i64> {
         let record = self.programs.get_mut(&id)?;
         Some(std::mem::replace(&mut record.state_value, value))
@@ -235,7 +246,7 @@ mod tests {
         code.extend_from_slice(&nonce.to_le_bytes());
         code.push(3);
         DeployProgram {
-            owner: Address::ZERO,
+            owner: ProgramId::ZERO,
             nonce,
             code: code.into(),
         }
@@ -280,7 +291,7 @@ mod tests {
             let record = records.get_mut(&id).unwrap();
             match case {
                 0 => record.code_hash = ProgramHash::from_bytes([0; HASH_SIZE]),
-                1 => record.owner = Address::from_bytes([1; crypto::ADDRESS_SIZE]),
+                1 => record.owner = ProgramId::from_bytes([1; crypto::PROGRAM_ID_SIZE]),
                 2 => record.nonce += 1,
                 3 => Arc::make_mut(&mut record.code)[0] = 0,
                 4 => {
@@ -310,5 +321,16 @@ mod tests {
             registry.validate(Height(3)),
             Err(RegistryError::InvalidRecord)
         );
+    }
+}
+
+impl AsRef<[u8; HASH_SIZE]> for ProgramHash {
+    fn as_ref(&self) -> &[u8; HASH_SIZE] {
+        self.as_bytes()
+    }
+}
+impl From<crypto::CodecError> for RegistryError {
+    fn from(_: crypto::CodecError) -> Self {
+        Self::Encoding
     }
 }

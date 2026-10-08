@@ -67,7 +67,7 @@ mod extension_commitment_tests {
         state::ExecutionContext,
         type_::{AssetCall, Register},
     };
-    use crypto::{Address, StateRoot};
+    use crypto::{ProgramId, StateRoot};
 
     #[test]
     fn extension_state_is_committed_serialized_and_supply_checked() {
@@ -77,7 +77,7 @@ mod extension_commitment_tests {
             name: "ROOT".into(),
             max_supply: Unit::from_units(100),
             initial_mint: Unit::from_units(10),
-            mint_authority: crate::common::Owner::Address(Address::ZERO),
+            mint_authority: crate::common::Owner::Program(ProgramId::ZERO),
             nonce: 1,
         });
         let journal = state
@@ -86,7 +86,7 @@ mod extension_commitment_tests {
             .apply(
                 &call,
                 ExecutionContext {
- actor: crate::common::Owner::Address(Address::ZERO),
+ actor: crate::common::Owner::Program(ProgramId::ZERO),
                     commitment: [3; 32],
                 },
             )

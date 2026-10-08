@@ -2,7 +2,7 @@ use kernel::{
     common::{ChainContext, Owner},
     consensus::{ProtocolBurn, StateTransitionWeight},
     crypto::{
-        AccountSignatureScheme, Address, SigningSeed, address_from_public_key, canonical_bytes,
+        AccountSignatureScheme, ProgramId, SigningSeed, program_id_from_public_key, canonical_bytes,
         canonical_decode,
     },
     ledger::{CoinUtxo, LedgerState, StateError},
@@ -29,11 +29,11 @@ fn seed() -> SigningSeed {
 }
 
 fn funded() -> LedgerState {
-    let owner = address_from_public_key(&seed().public_key()).unwrap();
+    let owner = program_id_from_public_key(&seed().public_key()).unwrap();
     let amount = Zeno::from_zeno(10_000_000);
     let coins = std::collections::BTreeMap::from([(
         CoinShare::from_bytes([1; 16]),
-        CoinUtxo { owner: kernel::common::Owner::Address(owner), amount },
+        CoinUtxo { owner: kernel::common::Owner::Program(owner), amount },
     )]);
     LedgerState {
         utxos: canonical_decode(&canonical_bytes(&(coins, amount)).unwrap()).unwrap(),
@@ -47,12 +47,12 @@ fn funded() -> LedgerState {
 
 fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvocation {
     let seed = seed();
-    let signer = address_from_public_key(&seed.public_key()).unwrap();
+    let signer = program_id_from_public_key(&seed.public_key()).unwrap();
     let chain = ChainContext::new([7; 32]);
     let (input, coin) = state
         .utxos
         .coins()
-        .find(|(_, coin)| coin.owner == kernel::common::Owner::Address(signer))
+        .find(|(_, coin)| coin.owner == kernel::common::Owner::Program(signer))
         .unwrap();
     let fee = Zeno::ONE;
     let build = |burn: u64| {
@@ -118,7 +118,7 @@ impl ApplicationExecutor for BadApplication {
         host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
         outputs: &[(Owner, u64)],
-        miner: Address,
+        miner: ProgramId,
         fee: u64,
     ) -> Result<(), TransferError<StateError>> {
         if matches!(self, Self::Omit) {
@@ -126,7 +126,7 @@ impl ApplicationExecutor for BadApplication {
         }
         let mut outputs = outputs.to_vec();
         if matches!(self, Self::RedirectCoin) {
-            outputs[0].0 = Owner::Address(Address::ZERO);
+            outputs[0].0 = Owner::Program(ProgramId::ZERO);
         }
         extension::coin_program::execute_transfer(host, inputs, &outputs, miner, fee)
     }
@@ -151,7 +151,7 @@ impl ApplicationExecutor for BadApplication {
 }
 
 fn register_call() -> ProgramCall {
-    let owner = address_from_public_key(&seed().public_key()).unwrap();
+    let owner = program_id_from_public_key(&seed().public_key()).unwrap();
     ProgramCall {
         program: SystemProgramId::ASSET,
         opcode: AssetOpcode::Register as u8,
@@ -159,7 +159,7 @@ fn register_call() -> ProgramCall {
             name: "BOUNDARY".into(),
             max_supply: Unit::from_units(100),
             initial_mint: Unit::from_units(10),
-            mint_authority: kernel::common::Owner::Address(owner),
+            mint_authority: kernel::common::Owner::Program(owner),
             nonce: 1,
         })
         .unwrap(),
@@ -180,7 +180,7 @@ fn extension_execution_obeys_signed_coin_effects_and_missing_apps_fail_closed() 
             state
                 .apply_program_call_with_applications(
                     tx,
-                    Address::ZERO,
+                    ProgramId::ZERO,
                     ChainContext::new([7; 32]),
                     1,
                     executor
@@ -194,7 +194,7 @@ fn extension_execution_obeys_signed_coin_effects_and_missing_apps_fail_closed() 
     state
         .apply_program_call_with_applications(
             tx,
-            Address::ZERO,
+            ProgramId::ZERO,
             ChainContext::new([7; 32]),
             1,
             &extension::SystemApplications,
@@ -217,7 +217,7 @@ fn asset_substitution_or_application_failure_cannot_change_state() {
             state
                 .apply_program_call_with_applications(
                     tx,
-                    Address::ZERO,
+                    ProgramId::ZERO,
                     ChainContext::new([7; 32]),
                     1,
                     &executor
@@ -235,7 +235,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
     let chain = ChainContext::new([7; 32]);
     let mut variants = Vec::new();
     let mut changed = tx.clone();
-    changed.payment.outputs[0].output = kernel::common::Owner::Address(Address::ZERO);
+    changed.payment.outputs[0].output = kernel::common::Owner::Program(ProgramId::ZERO);
     variants.push((changed, chain));
     let mut changed = tx.clone();
     changed.payment.inputs.push(changed.payment.inputs[0]);
@@ -262,7 +262,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
     // A valid attacker signature still cannot spend an input owned by another key.
     let attacker = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([22; 32]));
     let mut changed = tx;
-    changed.signer = address_from_public_key(&attacker.public_key()).unwrap();
+    changed.signer = program_id_from_public_key(&attacker.public_key()).unwrap();
     changed.payment.signer = changed.signer;
     let commitment =
         program_invocation_commitment(changed.signer, &changed.call, &changed.payment, chain)
@@ -279,7 +279,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
             state
                 .apply_program_call_with_applications(
                     changed,
-                    Address::ZERO,
+                    ProgramId::ZERO,
                     context,
                     1,
                     &extension::SystemApplications,
@@ -301,7 +301,7 @@ fn signed_asset_replay_is_rejected_without_changing_committed_state() {
     state
         .apply_program_call_with_applications(
             tx.clone(),
-            Address::ZERO,
+            ProgramId::ZERO,
             chain,
             1,
             &extension::SystemApplications,
@@ -314,7 +314,7 @@ fn signed_asset_replay_is_rejected_without_changing_committed_state() {
         state
             .apply_program_call_with_applications(
                 tx,
-                Address::ZERO,
+                ProgramId::ZERO,
                 chain,
                 2,
                 &extension::SystemApplications,
@@ -330,12 +330,12 @@ fn signed_asset_replay_is_rejected_without_changing_committed_state() {
 fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
     let mut state = funded();
     let chain = ChainContext::new([7; 32]);
-    let owner = address_from_public_key(&seed().public_key()).unwrap();
+    let owner = program_id_from_public_key(&seed().public_key()).unwrap();
     let register = invocation(&state, register_call());
     state
         .apply_program_call_with_applications(
             register,
-            Address::ZERO,
+            ProgramId::ZERO,
             chain,
             1,
             &extension::SystemApplications,
@@ -348,7 +348,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         payload: canonical_bytes(&Mint {
             asset,
             nonce: 1,
-            recipient: kernel::common::Owner::Address(owner),
+            recipient: kernel::common::Owner::Program(owner),
             amount: Unit::from_units(5),
         })
         .unwrap(),
@@ -357,7 +357,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
     state
         .apply_program_call_with_applications(
             tx,
-            Address::ZERO,
+            ProgramId::ZERO,
             chain,
             2,
             &extension::SystemApplications,
@@ -373,7 +373,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
     stale.payload = canonical_bytes(&Mint {
         asset,
         nonce: 1,
-        recipient: kernel::common::Owner::Address(owner),
+        recipient: kernel::common::Owner::Program(owner),
         amount: Unit::from_units(5),
     })
     .unwrap();
@@ -384,7 +384,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
             state
                 .utxos
                 .coins()
-                .find(|(_, c)| c.owner == kernel::common::Owner::Address(owner))
+                .find(|(_, c)| c.owner == kernel::common::Owner::Program(owner))
                 .unwrap()
                 .0,
         ],
@@ -407,7 +407,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         state
             .apply_program_call_with_applications(
                 tx,
-                Address::ZERO,
+                ProgramId::ZERO,
                 chain,
                 3,
                 &extension::SystemApplications

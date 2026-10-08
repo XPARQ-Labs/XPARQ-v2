@@ -43,7 +43,7 @@ wallet program-deploy --code counter.xpvm --nonce 1 --wallet /path/to/wallet.jso
 wallet program-call --program-id PROGRAM_ID --wallet /path/to/wallet.json --rpc 127.0.0.1:26666
 ```
 
-The binary, wallet address, and RPC must use the same network. For mainnet,
+The binary, wallet Program ID, and RPC must use the same network. For mainnet,
 the default local RPC port is 6666. Set `WALLET_BIN` when using the scripts with
 a wallet binary outside `target/release/wallet`.
 

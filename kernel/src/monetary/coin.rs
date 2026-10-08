@@ -1,5 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{Address, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, domain16};
+use crypto::{ProgramId, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, domain16};
 use std::{fmt, str::FromStr};
 
 pub const DECIMALS: u8 = 8;
@@ -280,9 +280,9 @@ impl CoinOutput {
     pub const fn to_owner(recipient: crate::common::Owner, amount: Zeno) -> Self {
         Self { output: recipient, amount }
     }
-    pub const fn new(recipient: Address, amount: Zeno) -> Self {
+    pub const fn new(recipient: ProgramId, amount: Zeno) -> Self {
         Self {
-            output: crate::common::Owner::Address(recipient),
+            output: crate::common::Owner::Program(recipient),
             amount,
         }
     }

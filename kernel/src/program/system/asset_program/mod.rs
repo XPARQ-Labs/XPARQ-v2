@@ -148,7 +148,7 @@ mod tests {
         let mint = Mint {
             asset: asset::AssetContract::from_bytes([1; crypto::HASH_SIZE]),
             nonce: 7,
-            recipient: Owner::Address(crypto::Address::from_bytes([2; crypto::ADDRESS_SIZE])),
+            recipient: Owner::Program(crypto::ProgramId::from_bytes([2; crypto::PROGRAM_ID_SIZE])),
             amount: asset::Unit::from_units(9),
         };
         let call = ProgramCall {
@@ -209,11 +209,11 @@ mod tests {
     fn rejects_zero_output_and_duplicate_inputs() {
         let asset = asset::AssetContract::from_bytes([1; crypto::HASH_SIZE]);
         let share = asset::Share::from_bytes([2; crypto::HASH16_SIZE]);
-        let recipient = crypto::Address::from_bytes([3; crypto::ADDRESS_SIZE]);
+        let recipient = crypto::ProgramId::from_bytes([3; crypto::PROGRAM_ID_SIZE]);
         let transfer = Transfer {
             asset,
             inputs: vec![share],
-            outputs: vec![asset::AssetOutput::new(crate::common::Owner::Address(recipient), asset::Unit::ZERO)],
+            outputs: vec![asset::AssetOutput::new(crate::common::Owner::Program(recipient), asset::Unit::ZERO)],
         };
         assert_eq!(
             decode(
@@ -225,7 +225,7 @@ mod tests {
         let transfer = Transfer {
             inputs: vec![share, share],
             outputs: vec![asset::AssetOutput::new(
-                crate::common::Owner::Address(recipient),
+                crate::common::Owner::Program(recipient),
                 asset::Unit::from_units(1),
             )],
             ..transfer

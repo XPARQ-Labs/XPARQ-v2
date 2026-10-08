@@ -2,7 +2,7 @@
 
 use kernel::{
     common::Owner,
-    crypto::Address,
+    crypto::ProgramId,
     ledger::StateError,
     monetary::coin::CoinShare,
     program::{
@@ -23,13 +23,13 @@ impl ApplicationExecutor for SystemApplications {
         host: &mut dyn CoinHost<Error = StateError>,
         inputs: &[CoinShare],
         outputs: &[(Owner, u64)],
-        miner: Address,
+        miner: ProgramId,
         miner_fee: u64,
     ) -> Result<(), TransferError<StateError>> {
-        crate::coin_program::execute_transfer(host, inputs, outputs, miner, miner_fee)
+        crate::monetary::execute_transfer(host, inputs, outputs, miner, miner_fee)
     }
 
     fn execute_asset(&self, call: &AssetCall, host: &mut dyn AssetHost) -> Result<(), AssetError> {
-        crate::asset_program::execute(call, host)
+        crate::monetary::execute_asset(call, host)
     }
 }

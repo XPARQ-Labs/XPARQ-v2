@@ -20,9 +20,9 @@ pub(super) enum ActivityLocation {
     },
 }
 
-pub(super) struct AddressActivityPage {
+pub(super) struct ProgramActivityPage {
     pub(super) locations: Vec<ActivityLocation>,
-    pub(super) next_cursor: Option<[u8; crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE]>,
+    pub(super) next_cursor: Option<[u8; crate::storage::PROGRAM_ACTIVITY_CURSOR_SIZE]>,
 }
 
 pub(super) fn canonical_block_height(
@@ -44,11 +44,11 @@ pub(super) fn coin_origin(
     crate::storage::read_coin_origin(path, share)
 }
 
-fn transaction_addresses(
+fn transaction_program_ids(
     transaction: &Transaction,
-    miner: Address,
-) -> Result<BTreeSet<Address>, String> {
-    let mut addresses = BTreeSet::new();
+    miner: ProgramId,
+) -> Result<BTreeSet<ProgramId>, String> {
+    let mut program_ids = BTreeSet::new();
 
     let (sender, outputs) = match transaction {
         AuthorizedProgramEnvelope::Program(transaction) => (
@@ -58,44 +58,43 @@ fn transaction_addresses(
     };
 
     let AuthorizedProgramEnvelope::Program(tx) = transaction;
-    addresses.extend(explorer::program_recipients(tx).into_iter().filter_map(
-        |owner| match owner {
-            kernel::common::Owner::Address(address) => Some(address),
-            kernel::common::Owner::Program(_) => None,
-        },
-    ));
-    addresses.insert(sender);
+    program_ids.extend(
+        explorer::program_recipients(tx)
+            .into_iter()
+            .map(|owner| owner.program()),
+    );
+    program_ids.insert(sender);
 
     for output in outputs {
-        if let Some(address) = explorer::output_recipient(&output) {
-            addresses.insert(address);
+        if let Some(program_id) = explorer::output_recipient(&output) {
+            program_ids.insert(program_id);
         }
     }
 
-    Ok(addresses)
+    Ok(program_ids)
 }
 
-pub(super) fn stored_address_activities(
+pub(super) fn stored_program_activities(
     block: &Block,
-) -> Result<Vec<crate::storage::StoredAddressActivity>, String> {
+) -> Result<Vec<crate::storage::StoredProgramActivity>, String> {
     let mut activities = Vec::new();
 
     if let Some(emission) = block.emission() {
-        activities.push(crate::storage::StoredAddressActivity {
-            address: emission.to.0,
+        activities.push(crate::storage::StoredProgramActivity {
+            program_id: emission.to.0,
             transaction_index: None,
         });
     }
 
-    let miner = block.miner_address();
+    let miner = block.miner_program_id();
 
     for (transaction_index, transaction) in block_program_transactions(block).enumerate() {
         let transaction_index =
             u64::try_from(transaction_index).map_err(|_| "transaction index exceeds u64")?;
 
-        for address in transaction_addresses(&transaction, miner)? {
-            activities.push(crate::storage::StoredAddressActivity {
-                address: address.0,
+        for program_id in transaction_program_ids(&transaction, miner)? {
+            activities.push(crate::storage::StoredProgramActivity {
+                program_id: program_id.0,
                 transaction_index: Some(transaction_index),
             });
         }
@@ -135,7 +134,7 @@ fn ensure_persistent_indexes(path: &Path, ledger: &Ledger) -> Result<(), String>
                     .map(|transaction| transaction.id().map_err(|error| error.to_string()))
                     .collect::<Result<Vec<_>, String>>()?,
 
-                activities: stored_address_activities(&block)?,
+                activities: stored_program_activities(&block)?,
             })
         })
     };
@@ -165,14 +164,14 @@ pub(super) fn transaction_location(
 }
 
 #[cfg(test)]
-pub(super) fn address_activity_locations(
+pub(super) fn program_activity_locations(
     path: &Path,
     ledger: &Ledger,
-    address: Address,
+    program_id: ProgramId,
 ) -> Result<Vec<ActivityLocation>, String> {
     ensure_persistent_indexes(path, ledger)?;
 
-    crate::storage::read_address_activities(path, address.0)?
+    crate::storage::read_program_activities(path, program_id.0)?
         .into_iter()
         .map(
             |(height, transaction_index)| -> Result<ActivityLocation, String> {
@@ -198,16 +197,16 @@ pub(super) fn address_activity_locations(
         .collect()
 }
 
-pub(super) fn address_activity_page(
+pub(super) fn program_activity_page(
     path: &Path,
     ledger: &Ledger,
-    address: Address,
-    before: Option<[u8; crate::storage::ADDRESS_ACTIVITY_CURSOR_SIZE]>,
+    program_id: ProgramId,
+    before: Option<[u8; crate::storage::PROGRAM_ACTIVITY_CURSOR_SIZE]>,
     limit: usize,
-) -> Result<AddressActivityPage, String> {
+) -> Result<ProgramActivityPage, String> {
     ensure_persistent_indexes(path, ledger)?;
 
-    let page = crate::storage::read_address_activities_page(path, address.0, before, limit)?;
+    let page = crate::storage::read_program_activities_page(path, program_id.0, before, limit)?;
 
     let locations = page
         .entries
@@ -235,7 +234,7 @@ pub(super) fn address_activity_page(
         )
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(AddressActivityPage {
+    Ok(ProgramActivityPage {
         locations,
         next_cursor: page.next_cursor,
     })

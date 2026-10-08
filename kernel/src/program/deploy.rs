@@ -1,17 +1,17 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::Address;
+use crypto::ProgramId;
 use std::io::Read;
 use std::sync::Arc;
 
 use crate::common::Height;
 
-use super::registry::{ProgramHash, ProgramId, ProgramRecord, ProgramRegistry, RegistryError};
+use super::registry::{ProgramHash, ProgramRecord, ProgramRegistry, RegistryError};
 
 pub const MAX_PROGRAM_CODE_SIZE: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct DeployProgram {
-    pub owner: Address,
+    pub owner: ProgramId,
     pub nonce: u64,
     /// Shared code bytes; canonical encoding remains the historical Vec encoding.
     pub code: Arc<Vec<u8>>,
@@ -20,7 +20,7 @@ pub struct DeployProgram {
 impl BorshDeserialize for DeployProgram {
     fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         Ok(Self {
-            owner: Address::deserialize_reader(reader)?,
+            owner: ProgramId::deserialize_reader(reader)?,
             nonce: u64::deserialize_reader(reader)?,
             code: super::deserialize_program_code(reader)?.into(),
         })
@@ -43,7 +43,7 @@ impl DeployProgram {
     }
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(BorshSerialize, Debug, Clone, PartialEq, Eq)]
 pub enum ProgramJournal {
     Deploy {
         program_id: ProgramId,
@@ -52,6 +52,70 @@ pub enum ProgramJournal {
         program_id: ProgramId,
         previous: i64,
     },
+    // Appended after historical variants to preserve their wire tags.
+    Calls {
+        states: Vec<(ProgramId, i64)>,
+        storage: Vec<(ProgramId, Vec<u8>, Option<Vec<u8>>)>,
+    },
+}
+
+impl BorshDeserialize for ProgramJournal {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        use std::io::{Error, ErrorKind};
+        fn invalid() -> Error {
+            Error::new(ErrorKind::InvalidData, "invalid VM rollback journal")
+        }
+        fn bytes<R: Read>(reader: &mut R, max: usize) -> std::io::Result<Vec<u8>> {
+            let n = u32::deserialize_reader(reader)? as usize;
+            if n == 0 || n > max {
+                return Err(invalid());
+            }
+            let mut v = vec![0; n];
+            reader.read_exact(&mut v)?;
+            Ok(v)
+        }
+        match u8::deserialize_reader(reader)? {
+            0 => Ok(Self::Deploy {
+                program_id: ProgramId::deserialize_reader(reader)?,
+            }),
+            1 => Ok(Self::State {
+                program_id: ProgramId::deserialize_reader(reader)?,
+                previous: i64::deserialize_reader(reader)?,
+            }),
+            2 => {
+                let states = super::deserialize_bounded_vec::<(ProgramId, i64), _>(
+                    reader,
+                    super::vm_app::MAX_CALLS,
+                )?;
+                if states.windows(2).any(|v| v[0].0 >= v[1].0) {
+                    return Err(invalid());
+                }
+                let n = u32::deserialize_reader(reader)? as usize;
+                if n > super::vm_app::MAX_ACTIONS {
+                    return Err(invalid());
+                }
+                let mut storage = Vec::new();
+                for _ in 0..n {
+                    let id = ProgramId::deserialize_reader(reader)?;
+                    let key = bytes(reader, super::vm_app::MAX_KEY_BYTES)?;
+                    if storage
+                        .last()
+                        .is_some_and(|(last_id, last_key, _)| (*last_id, last_key) >= (id, &key))
+                    {
+                        return Err(invalid());
+                    }
+                    let value = match u8::deserialize_reader(reader)? {
+                        0 => None,
+                        1 => Some(bytes(reader, super::vm_app::MAX_DATA_BYTES)?),
+                        _ => return Err(invalid()),
+                    };
+                    storage.push((id, key, value));
+                }
+                Ok(Self::Calls { states, storage })
+            }
+            _ => Err(invalid()),
+        }
+    }
 }
 
 pub fn deploy_program(
@@ -77,8 +141,8 @@ pub(crate) fn prepare_deployment(
 
     let code_hash = ProgramHash::derive(&deploy.code).map_err(DeployError::Registry)?;
 
-    let program_id =
-        ProgramId::derive(deploy.owner, deploy.nonce, code_hash).map_err(DeployError::Registry)?;
+    let program_id = ProgramId::derive(deploy.owner, deploy.nonce, code_hash)
+        .map_err(|_| DeployError::Registry(RegistryError::Encoding))?;
 
     let record = ProgramRecord {
         code_hash,
@@ -87,6 +151,7 @@ pub(crate) fn prepare_deployment(
         nonce: deploy.nonce,
         deployed_at: height,
         state_value: 0,
+        storage: Default::default(),
     };
 
     Ok((program_id, record))
@@ -97,6 +162,18 @@ pub fn rollback_program(
     journal: ProgramJournal,
 ) -> Result<(), DeployError> {
     match journal {
+        ProgramJournal::Calls { states, storage } => {
+            for (id, previous) in states {
+                registry
+                    .set_state(id, previous)
+                    .ok_or(DeployError::MissingProgram)?;
+            }
+            for (id, key, previous) in storage {
+                registry
+                    .set_storage(id, key, previous)
+                    .map_err(DeployError::Registry)?;
+            }
+        }
         ProgramJournal::Deploy { program_id } => {
             registry
                 .remove(&program_id)
@@ -141,7 +218,7 @@ fn valid_code(value: u64) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::ledger::{LedgerState, StateRollbackJournal};
-    use crypto::Address;
+    use crypto::ProgramId;
 
     #[test]
     fn deploy_and_rollback_restore_registry() {
@@ -151,7 +228,7 @@ mod tests {
         let (program_id, journal) = deploy_program(
             &mut state.programs,
             DeployProgram {
-                owner: Address::ZERO,
+                owner: ProgramId::ZERO,
                 nonce: 1,
                 code: valid_code(1).into(),
             },
@@ -177,7 +254,7 @@ fn duplicate_program_deployment_is_rejected() {
     let mut registry = ProgramRegistry::default();
 
     let deploy = DeployProgram {
-        owner: Address::ZERO,
+        owner: ProgramId::ZERO,
         nonce: 1,
         code: valid_code(1).into(),
     };
@@ -202,7 +279,7 @@ fn empty_program_is_rejected() {
     let result = deploy_program(
         &mut registry,
         DeployProgram {
-            owner: Address::ZERO,
+            owner: ProgramId::ZERO,
             nonce: 1,
             code: vec![].into(),
         },
@@ -220,7 +297,7 @@ fn oversized_program_is_rejected() {
     let result = deploy_program(
         &mut registry,
         DeployProgram {
-            owner: Address::ZERO,
+            owner: ProgramId::ZERO,
             nonce: 1,
             code: vec![0; MAX_PROGRAM_CODE_SIZE + 1].into(),
         },
@@ -238,7 +315,7 @@ fn different_deploys_produce_different_program_ids() {
     let (first, _) = deploy_program(
         &mut registry,
         DeployProgram {
-            owner: Address::ZERO,
+            owner: ProgramId::ZERO,
             nonce: 1,
             code: valid_code(1).into(),
         },
@@ -249,7 +326,7 @@ fn different_deploys_produce_different_program_ids() {
     let (second, _) = deploy_program(
         &mut registry,
         DeployProgram {
-            owner: Address::ZERO,
+            owner: ProgramId::ZERO,
             nonce: 2,
             code: valid_code(2).into(),
         },

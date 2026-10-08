@@ -9,7 +9,7 @@ use std::{
 };
 
 use kernel::{
-    crypto::{Signature, SigningSeed, address_from_public_key, address_to_string, canonical_bytes},
+    crypto::{Signature, SigningSeed, program_id_from_public_key, program_id_to_string, canonical_bytes},
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     program::{AuthorizedProgramEnvelope, CoinTransition, ProgramEnvelope as Transaction},
 };
@@ -47,8 +47,8 @@ fn free_address() -> String {
     listener.local_addr().unwrap().to_string()
 }
 
-fn miner_address() -> String {
-    address_to_string(&sender_wallet().address)
+fn miner_program_id() -> String {
+    program_id_to_string(&sender_wallet().program_id)
 }
 
 fn sender_wallet() -> AccountWallet {
@@ -59,7 +59,7 @@ fn sender_wallet() -> AccountWallet {
 fn mine(database: &Path, blocks: u64) {
     for _ in 0..blocks {
         let status = Command::new(node_binary())
-            .args(["mine-block", database.to_str().unwrap(), &miner_address()])
+            .args(["mine-block", database.to_str().unwrap(), &miner_program_id()])
             .stdout(Stdio::null())
             .status()
             .unwrap();
@@ -73,6 +73,17 @@ fn start_node(
     rpc: &str,
     peers: &[&str],
     miner: Option<&str>,
+) -> NodeProcess {
+    start_node_with_options(database, p2p, rpc, peers, miner, &[])
+}
+
+fn start_node_with_options(
+    database: &Path,
+    p2p: &str,
+    rpc: &str,
+    peers: &[&str],
+    miner: Option<&str>,
+    options: &[&str],
 ) -> NodeProcess {
     let mut command = Command::new(node_binary());
     command.args([
@@ -90,6 +101,7 @@ fn start_node(
     if let Some(miner) = miner {
         command.args(["--miner", miner]);
     }
+    command.args(options);
     NodeProcess(
         command
             .stdout(Stdio::null())
@@ -159,7 +171,7 @@ fn post_program_rpc(rpc: &str, route: &str, transaction: &Transaction) -> Value 
 }
 
 fn account(rpc: &str, address: &str) -> Result<Value, String> {
-    http_get(rpc, &format!("/account/{address}"))
+    http_get(rpc, &format!("/program/account/{address}"))
 }
 
 fn wait_for_status(rpc: &str, predicate: impl Fn(&Value) -> bool) -> Value {
@@ -314,11 +326,11 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     wait_for_status(&c_rpc, |status| status["tip_height"] == 2);
 
     let sender = sender_wallet();
-    let sender_address = address_to_string(&sender.address);
+    let sender_program_id = program_id_to_string(&sender.program_id);
     let recipient_keys = SigningSeed::new(Signature::MlDsa44, Box::new([43; 32]));
-    let recipient = address_from_public_key(&recipient_keys.public_key()).unwrap();
-    let recipient_address = address_to_string(&recipient);
-    let sender_account = account(&a_rpc, &sender_address).unwrap();
+    let recipient = program_id_from_public_key(&recipient_keys.public_key()).unwrap();
+    let recipient_address = program_id_to_string(&recipient);
+    let sender_account = account(&a_rpc, &sender_program_id).unwrap();
     let available = sender_account["utxos"]
         .as_array()
         .unwrap()
@@ -340,37 +352,41 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     .unwrap();
     // Both canonical history burn and relay fee depend on the signed size.
     let mut archival_bytes = 0;
+    let mut miner_fee = 1;
     let transaction = loop {
         let burn = state_burn.as_zeno() + archival_bytes;
         let intent = CoinTransition::coin_with_charges(
-            sender.address,
+            sender.program_id,
             vec![input_id],
             vec![
                 CoinOutput::new(recipient, sent),
                 CoinOutput::new(
-                    sender.address,
-                    Zeno::from_zeno(input_amount - sent.as_zeno() - burn - archival_bytes.max(1)),
+                    sender.program_id,
+                    Zeno::from_zeno(input_amount - sent.as_zeno() - burn - miner_fee),
                 ),
             ],
-            kernel::program::CoinCharges::new(Zeno::from_zeno(archival_bytes.max(1))),
+            kernel::program::CoinCharges::new(Zeno::from_zeno(miner_fee)),
         )
         .unwrap();
         let transaction =
             AuthorizedProgramEnvelope::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()));
-        let required = (canonical_bytes(&transaction).unwrap().len() as u64)
-            .checked_mul(8)
+        let size = canonical_bytes(&transaction).unwrap().len() as u64;
+        let required_fee = size.checked_mul(8).unwrap();
+        let required_burn = size
+            .checked_mul(kernel::consensus::STATE_BURN_RATE_ZENO_PER_BYTE)
             .unwrap();
-        if required == archival_bytes {
+        if required_burn == archival_bytes && required_fee == miner_fee {
             break transaction;
         }
-        archival_bytes = required;
+        archival_bytes = required_burn;
+        miner_fee = required_fee;
     };
     let transaction_hash = hex::encode(transaction.id().unwrap());
     let submitted = post_transaction(&a_rpc, &transaction);
     assert_eq!(submitted["hash"], transaction_hash);
 
     wait_for_status(&c_rpc, |_| {
-        account(&c_rpc, &sender_address).is_ok_and(|account| {
+        account(&c_rpc, &sender_program_id).is_ok_and(|account| {
             account["utxos"]
                 .as_array()
                 .is_some_and(|utxos| utxos.iter().any(|utxo| utxo["reserved"] == true))
@@ -404,10 +420,10 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     assert_eq!(transaction_response["status"], "confirmed");
     assert_eq!(transaction_response["height"], 3);
 
-    let address_response = http_get(&c_rpc, &format!("/explorer/address/{recipient_address}"))
+    let program_response = http_get(&c_rpc, &format!("/explorer/program/{recipient_address}"))
         .expect("address explorer lookup after restart");
 
-    let activities = address_response["activities"]
+    let activities = program_response["activities"]
         .as_array()
         .expect("address activities");
 
@@ -441,8 +457,8 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
     };
     let root = temp_root("program-call");
     let keys = SigningSeed::new(Signature::MlDsa44, Box::new([51; 32]));
-    let signer = address_from_public_key(&keys.public_key()).unwrap();
-    let address = address_to_string(&signer);
+    let signer = program_id_from_public_key(&keys.public_key()).unwrap();
+    let address = program_id_to_string(&signer);
     let mine_program = || {
         let result = Command::new(node_binary())
             .args(["mine-block", root.to_str().unwrap(), &address])
@@ -464,7 +480,7 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
         name: "LIVEPROGRAM".into(),
         max_supply: Unit::from_units(100),
         initial_mint: Unit::from_units(10),
-        mint_authority: kernel::common::Owner::Address(signer),
+        mint_authority: kernel::common::Owner::Program(signer),
         nonce: 1,
     };
     let call = ProgramCall {
@@ -621,3 +637,78 @@ fn advertised_dns_is_discovered_and_persisted_across_restart() {
 }
 
 mod program_network;
+
+#[test]
+fn configured_chain_minimums_filter_sync_until_both_floors_are_met() {
+    let root = temp_root("minimum-chain");
+    fs::create_dir_all(&root).unwrap();
+    let source_db = root.join("source");
+    let receiver_db = root.join("receiver");
+    mine(&source_db, 1);
+    let source_p2p = free_address();
+    let source_rpc = free_address();
+    let source = start_node(&source_db, &source_p2p, &source_rpc, &[], None);
+    let expected = wait_for_status(&source_rpc, |s| s["tip_height"] == 1);
+    let work = expected["cumulative_work"].as_str().unwrap();
+    let weight = expected["cumulative_weight"].as_str().unwrap();
+    let receiver_p2p = free_address();
+    let receiver_rpc = free_address();
+    let too_much_work = "f".repeat(128);
+    let too_much_weight = (weight.parse::<u64>().unwrap() + 1).to_string();
+    for (minimum_work, minimum_weight) in [
+        (too_much_work.as_str(), "0"),
+        ("0", too_much_weight.as_str()),
+    ] {
+        let receiver = start_node_with_options(
+            &receiver_db,
+            &receiver_p2p,
+            &receiver_rpc,
+            &[source_p2p.as_str()],
+            None,
+            &[
+                "--minimum-chain-work",
+                minimum_work,
+                "--minimum-chain-weight",
+                minimum_weight,
+            ],
+        );
+        let actual = wait_for_status(&receiver_rpc, |s| s["tip_height"] == 0);
+        assert_eq!(actual["minimum_chain_weight"], minimum_weight);
+        assert_eq!(
+            actual["minimum_chain_work"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches('0'),
+            minimum_work.trim_start_matches('0')
+        );
+        assert_eq!(actual["meets_chain_minimums"], false);
+        // Stay below the floor even after a peer session has had time to sync.
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(status(&receiver_rpc).unwrap()["tip_height"], 0);
+        drop(receiver);
+    }
+    let receiver = start_node_with_options(
+        &receiver_db,
+        &receiver_p2p,
+        &receiver_rpc,
+        &[source_p2p.as_str()],
+        None,
+        &[
+            "--minimum-chain-work",
+            work,
+            "--minimum-chain-weight",
+            weight,
+        ],
+    );
+    let actual = wait_for_status(&receiver_rpc, |s| s["tip_hash"] == expected["tip_hash"]);
+    assert_eq!(actual["tip_height"], 1);
+    assert_eq!(actual["meets_chain_minimums"], true);
+    assert_eq!(actual["minimum_chain_work"], expected["cumulative_work"]);
+    assert_eq!(
+        actual["minimum_chain_weight"],
+        expected["cumulative_weight"]
+    );
+    drop(receiver);
+    drop(source);
+    fs::remove_dir_all(root).unwrap();
+}

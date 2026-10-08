@@ -8,6 +8,7 @@ pub mod preparation;
 pub mod registry;
 pub mod system;
 pub mod vm;
+pub mod vm_app;
 pub mod vm_transfer;
 
 pub use crate::error::{IntentError, ProgramEncodingError};
@@ -75,11 +76,11 @@ mod phase3_bounds_tests {
     use super::*;
     use crate::monetary::coin::CoinShare;
     use borsh::BorshDeserialize;
-    use crypto::Address;
+    use crypto::ProgramId;
 
     #[test]
     fn oversized_coin_list_prefix_is_rejected_before_elements() {
-        let mut bytes = vec![0_u8; crypto::ADDRESS_SIZE];
+        let mut bytes = vec![0_u8; crypto::PROGRAM_ID_SIZE];
         bytes.extend_from_slice(&((MAX_PROGRAM_ITEMS + 1) as u32).to_le_bytes());
         assert!(CoinTransition::try_from_slice(&bytes).is_err());
     }
@@ -87,7 +88,7 @@ mod phase3_bounds_tests {
     #[test]
     fn in_memory_oversized_transition_is_rejected() {
         let intent = CoinTransition {
-            signer: Address::ZERO,
+            signer: ProgramId::ZERO,
             inputs: vec![CoinShare::from_bytes([1; crypto::HASH16_SIZE]); MAX_PROGRAM_ITEMS + 1],
             outputs: vec![],
             charges: CoinCharges::default(),

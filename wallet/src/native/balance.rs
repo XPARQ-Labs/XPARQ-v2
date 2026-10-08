@@ -7,11 +7,12 @@ pub(super) fn print_balance(args: &[String]) -> Result<(), String> {
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
-    let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
+    let program_id =
+        kernel::crypto::program_id_to_string(&wallet_program_id_from_file_bytes(&bytes)?);
+    let balance: BalanceResponse = http_get_json(rpc, &format!("/program/balance/{program_id}"))?;
     let burn: NodeBurnResponse = http_get_json(rpc, "/status")?;
 
-    println!("Address: {address}");
+    println!("Program ID: {program_id}");
     println!("Available: {}", format_amount(balance.total));
     println!("Reserved: {}", format_amount(balance.reserved));
     println!("UTXOs: {}", balance.utxo_count);

@@ -6,7 +6,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::HASH_SIZE;
 #[cfg(test)]
-use crypto::Address;
+use crypto::ProgramId;
 
 use super::asset::{AssetContract, AssetError, AssetShare, Metadata, Share, Unit};
 
@@ -51,7 +51,7 @@ pub struct AssetState {
 /// The kernel must authenticate the caller and bind `commitment` to this call.
 ///
 /// `actor` is the ledger principal whose authority is exercised by the call.
-/// For a direct user action it is `Owner::Address(signer)`; for a program action
+/// For a signature-policy action it is `Owner::Program(signer)`; for a VM action
 /// it is `Owner::Program(program_id)`. The kernel, not call payload data, must
 /// bind the actor to the authenticated execution path.
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +69,39 @@ pub struct AssetJournal {
 }
 
 impl AssetJournal {
+    /// Exact canonical map-size delta using original snapshots and final touched entries.
+    /// Map length prefixes have fixed width; unchanged entries need no serialization.
+    pub(crate) fn canonical_delta(&self, state: &AssetState) -> Result<i128, AssetError> {
+        fn size<K: BorshSerialize, V: BorshSerialize>(
+            key: &K,
+            value: Option<&V>,
+        ) -> Result<i128, AssetError> {
+            value
+                .map(|value| {
+                    crypto::canonical_bytes(&(key, value))
+                        .map(|v| v.len() as i128)
+                        .map_err(|_| AssetError::Encoding)
+                })
+                .unwrap_or(Ok(0))
+        }
+        let mut delta = 0i128;
+        for (key, previous) in &self.records {
+            delta = delta
+                .checked_add(size(key, state.records.get(key))? - size(key, previous.as_ref())?)
+                .ok_or(AssetError::BalanceOverflow)?;
+        }
+        for (key, previous) in &self.shares {
+            delta = delta
+                .checked_add(size(key, state.shares.get(key))? - size(key, previous.as_ref())?)
+                .ok_or(AssetError::BalanceOverflow)?;
+        }
+        Ok(delta)
+    }
+
+    pub(crate) fn share_changes(&self) -> impl Iterator<Item = (Share, Option<AssetShare>)> + '_ {
+        self.shares.iter().copied()
+    }
+
     /// Compose sequential operations while preserving each key's pre-call value.
     /// A later snapshot must not replace the original rollback value.
     pub(crate) fn merge(self, next: Self) -> Self {
@@ -150,41 +183,83 @@ impl AssetState {
         crate::program::system::asset_program::decode(opcode as u8, &payload)
             .map_err(|_| AssetError::InvalidProgram)?;
 
-        let mut next = self.clone();
-
-        next.apply_monetary_operation(call, context)?;
-
-        let record_keys: BTreeSet<_> = self
+        let mut journal = self.snapshot_operation(call, context)?;
+        if let Err(error) = self.apply_monetary_operation(call, context) {
+            self.rollback(journal);
+            return Err(error);
+        }
+        // Preserve the historical journal encoding: sorted keys, changed values only.
+        journal
             .records
-            .keys()
-            .chain(next.records.keys())
-            .copied()
-            .collect();
-
-        let share_keys: BTreeSet<_> = self
+            .retain(|(key, previous)| self.records.get(key) != previous.as_ref());
+        journal
             .shares
-            .keys()
-            .chain(next.shares.keys())
-            .copied()
-            .collect();
-
-        let journal = AssetJournal {
-            records: record_keys
-                .into_iter()
-                .filter(|key| self.records.get(key) != next.records.get(key))
-                .map(|key| (key, self.records.get(&key).cloned()))
-                .collect(),
-
-            shares: share_keys
-                .into_iter()
-                .filter(|key| self.shares.get(key) != next.shares.get(key))
-                .map(|key| (key, self.shares.get(&key).cloned()))
-                .collect(),
-        };
-
-        *self = next;
-
+            .retain(|(key, previous)| self.shares.get(key) != previous.as_ref());
         Ok(journal)
+    }
+
+    /// Include every input, possible output collision and accounting record before
+    /// mutation. No monetary operation may read or write outside this footprint.
+    fn snapshot_operation(
+        &self,
+        call: &AssetCall,
+        context: ExecutionContext,
+    ) -> Result<AssetJournal, AssetError> {
+        let (asset, inputs, outputs) = match call {
+            AssetCall::Register(call) => {
+                let metadata = Metadata::new(
+                    call.name.clone(),
+                    call.max_supply,
+                    context.actor,
+                    call.mint_authority,
+                )?;
+                (AssetContract::derive(&metadata, call.nonce)?, &[][..], 1)
+            }
+            AssetCall::Mint(call) => (call.asset, &[][..], 1),
+            AssetCall::Transfer(call) => (call.asset, call.inputs.as_slice(), call.outputs.len()),
+            AssetCall::Burn(call) => (
+                call.asset,
+                call.inputs.as_slice(),
+                usize::from(!call.output.is_zero()),
+            ),
+        };
+        let mut shares: BTreeSet<_> = inputs.iter().copied().collect();
+        for index in 0..outputs {
+            shares.insert(Share::derive(
+                asset,
+                context.commitment,
+                u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?,
+            ));
+        }
+        Ok(AssetJournal {
+            records: vec![(asset, self.records.get(&asset).cloned())],
+            shares: shares
+                .into_iter()
+                .map(|key| (key, self.shares.get(&key).copied()))
+                .collect(),
+        })
+    }
+
+    /// Build a private quote state containing only entries read or written by this
+    /// instruction. Existing output IDs are included so collisions fail identically.
+    pub(crate) fn operation_view(
+        &self,
+        call: &AssetCall,
+        context: ExecutionContext,
+    ) -> Result<Self, AssetError> {
+        let journal = self.snapshot_operation(call, context)?;
+        Ok(Self {
+            records: journal
+                .records
+                .into_iter()
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                .collect(),
+            shares: journal
+                .shares
+                .into_iter()
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                .collect(),
+        })
     }
 
     pub(crate) fn rollback(&mut self, journal: AssetJournal) {
@@ -495,13 +570,194 @@ mod tests {
         type_::{Burn, Mint, Register, Transfer},
     };
 
+    // Historical clone-and-diff implementation, retained only as a test oracle.
+    fn legacy_apply(
+        state: &mut AssetState,
+        call: &AssetCall,
+        context: ExecutionContext,
+    ) -> Result<AssetJournal, AssetError> {
+        let mut next = state.clone();
+        next.apply_monetary_operation(call, context)?;
+        let record_keys: BTreeSet<_> = state
+            .records
+            .keys()
+            .chain(next.records.keys())
+            .copied()
+            .collect();
+        let share_keys: BTreeSet<_> = state
+            .shares
+            .keys()
+            .chain(next.shares.keys())
+            .copied()
+            .collect();
+        let journal = AssetJournal {
+            records: record_keys
+                .into_iter()
+                .filter(|key| state.records.get(key) != next.records.get(key))
+                .map(|key| (key, state.records.get(&key).cloned()))
+                .collect(),
+            shares: share_keys
+                .into_iter()
+                .filter(|key| state.shares.get(key) != next.shares.get(key))
+                .map(|key| (key, state.shares.get(&key).copied()))
+                .collect(),
+        };
+        *state = next;
+        Ok(journal)
+    }
+
+    fn assert_sparse_matches_full(state: &AssetState, call: &AssetCall, context: ExecutionContext) {
+        let before = borsh::to_vec(state).unwrap().len() as i128;
+        let mut legacy = state.clone();
+        let old = legacy_apply(&mut legacy, call, context).unwrap();
+        let mut sparse = state.clone();
+        let journal = sparse.apply(call, context).unwrap();
+        assert_eq!(sparse, legacy);
+        assert_eq!(
+            borsh::to_vec(&journal).unwrap(),
+            borsh::to_vec(&old).unwrap()
+        );
+        let delta = borsh::to_vec(&legacy).unwrap().len() as i128 - before;
+        assert_eq!(journal.canonical_delta(&sparse).unwrap(), delta);
+        let mut view = state.operation_view(call, context).unwrap();
+        let preview = view.apply(call, context).unwrap();
+        assert_eq!(preview, journal);
+        assert_eq!(preview.canonical_delta(&view).unwrap(), delta);
+    }
+
+    #[test]
+    fn sparse_transfer_collision_restores_consumed_inputs_and_created_outputs() {
+        let owner = Owner::Program(ProgramId([41; HASH_SIZE]));
+        let mut state = AssetState::default();
+        let register = AssetCall::Register(Register {
+            name: "Sparse".into(),
+            max_supply: Unit::from_units(100),
+            initial_mint: Unit::from_units(10),
+            mint_authority: owner,
+            nonce: 1,
+        });
+        let context = ExecutionContext {
+            actor: owner,
+            commitment: [1; HASH_SIZE],
+        };
+        assert_sparse_matches_full(&state, &register, context);
+        state.apply(&register, context).unwrap();
+        let asset = *state.records.keys().next().unwrap();
+        let input = *state.shares.keys().next().unwrap();
+        let context = ExecutionContext {
+            actor: owner,
+            commitment: [2; HASH_SIZE],
+        };
+        let collision = Share::derive(asset, context.commitment, 1);
+        state.shares.insert(
+            collision,
+            AssetShare::new(asset, Unit::from_units(7), owner),
+        );
+        let record = state.records.get_mut(&asset).unwrap();
+        record.supply = Unit::from_units(17);
+        record.total_minted = Unit::from_units(17);
+        let call = AssetCall::Transfer(Transfer {
+            asset,
+            inputs: vec![input],
+            outputs: vec![
+                AssetOutput::new(owner, Unit::from_units(4)),
+                AssetOutput::new(owner, Unit::from_units(6)),
+            ],
+        });
+        let before = state.clone();
+        assert_eq!(
+            state.apply(&call, context),
+            Err(AssetError::ShareAlreadyExists)
+        );
+        assert_eq!(state, before);
+        let mut view = state.operation_view(&call, context).unwrap();
+        let view_before = view.clone();
+        assert_eq!(
+            view.apply(&call, context),
+            Err(AssetError::ShareAlreadyExists)
+        );
+        assert_eq!(view, view_before);
+    }
+
+    #[test]
+    #[ignore = "manual clone microbenchmark; use release mode and --nocapture"]
+    fn benchmark_asset_clone_and_sparse_journal() {
+        use std::{hint::black_box, time::Instant};
+        let owner = Owner::Program(ProgramId([41; HASH_SIZE]));
+        let mut base = AssetState::default();
+        let context = ExecutionContext {
+            actor: owner,
+            commitment: [1; HASH_SIZE],
+        };
+        base.apply(
+            &AssetCall::Register(Register {
+                name: "Bench".into(),
+                max_supply: Unit::from_units(1_000_000),
+                initial_mint: Unit::from_units(1),
+                mint_authority: owner,
+                nonce: 1,
+            }),
+            context,
+        )
+        .unwrap();
+        let asset = *base.records.keys().next().unwrap();
+        for index in 0..20_000 {
+            base.shares.insert(
+                Share::derive(asset, [7; HASH_SIZE], index),
+                AssetShare::new(asset, Unit::from_units(1), owner),
+            );
+        }
+        let record = base.records.get_mut(&asset).unwrap();
+        record.supply = Unit::from_units(20_001);
+        record.total_minted = Unit::from_units(20_001);
+        let calls: Vec<_> = (1..=128u64)
+            .map(|nonce| {
+                let mut commitment = [0; HASH_SIZE];
+                commitment[..8].copy_from_slice(&nonce.to_le_bytes());
+                (
+                    AssetCall::Mint(Mint {
+                        asset,
+                        recipient: owner,
+                        amount: Unit::from_units(1),
+                        nonce,
+                    }),
+                    ExecutionContext {
+                        actor: owner,
+                        commitment,
+                    },
+                )
+            })
+            .collect();
+        let mut old = base.clone();
+        let mut sparse = base;
+        let start = Instant::now();
+        let old_journals: Vec<_> = calls
+            .iter()
+            .map(|(call, context)| legacy_apply(&mut old, call, *context).unwrap())
+            .collect();
+        let cloned = start.elapsed();
+        let start = Instant::now();
+        for ((call, context), expected) in calls.iter().zip(old_journals) {
+            let journal = sparse.apply(call, *context).unwrap();
+            assert_eq!(journal, expected);
+            black_box(&sparse);
+        }
+        let journaled = start.elapsed();
+        assert_eq!(sparse, old);
+        println!(
+            "shares=20000 operations=128 clone_diff_ms={:.3} sparse_journal_ms={:.3}",
+            cloned.as_secs_f64() * 1000.0,
+            journaled.as_secs_f64() * 1000.0
+        );
+    }
+
     #[test]
 
     fn lifetime_mint_cap_cannot_be_bypassed_by_burning_and_reminting() {
-        let owner = Address([1; crypto::ADDRESS_SIZE]);
+        let owner = ProgramId([1; crypto::PROGRAM_ID_SIZE]);
 
         let context = |byte| ExecutionContext {
-            actor: Owner::Address(owner),
+            actor: Owner::Program(owner),
             commitment: [byte; HASH_SIZE],
         };
 
@@ -516,7 +772,7 @@ mod tests {
 
                     initial_mint: Unit::from_units(90),
 
-                    mint_authority: Owner::Address(owner),
+                    mint_authority: Owner::Program(owner),
 
                     nonce: 1,
                 }),
@@ -551,7 +807,7 @@ mod tests {
 
                 nonce: 1,
 
-                recipient: Owner::Address(owner),
+                recipient: Owner::Program(owner),
 
                 amount: Unit::from_units(20),
             }),
@@ -566,10 +822,10 @@ mod tests {
     #[test]
 
     fn transfer_collision_after_consumption_is_atomic() {
-        let owner = Address([1; crypto::ADDRESS_SIZE]);
+        let owner = ProgramId([1; crypto::PROGRAM_ID_SIZE]);
 
         let context = |byte| ExecutionContext {
-            actor: Owner::Address(owner),
+            actor: Owner::Program(owner),
             commitment: [byte; HASH_SIZE],
         };
 
@@ -584,7 +840,7 @@ mod tests {
 
                     initial_mint: Unit::from_units(10),
 
-                    mint_authority: Owner::Address(owner),
+                    mint_authority: Owner::Program(owner),
 
                     nonce: 1,
                 }),
@@ -601,7 +857,7 @@ mod tests {
 
                     nonce: 1,
 
-                    recipient: Owner::Address(owner),
+                    recipient: Owner::Program(owner),
 
                     amount: Unit::from_units(5),
                 }),
@@ -618,7 +874,7 @@ mod tests {
                 inputs: vec![Share::derive(asset, [1; HASH_SIZE], 0)],
 
                 outputs: vec![AssetOutput::new(
-                    Owner::Address(owner),
+                    Owner::Program(owner),
                     Unit::from_units(10),
                 )],
             }),
@@ -633,10 +889,10 @@ mod tests {
     #[test]
 
     fn mint_amount_and_nonce_overflow_fail_without_mutation() {
-        let owner = Address([1; crypto::ADDRESS_SIZE]);
+        let owner = ProgramId([1; crypto::PROGRAM_ID_SIZE]);
 
         let context = ExecutionContext {
-            actor: Owner::Address(owner),
+            actor: Owner::Program(owner),
             commitment: [1; HASH_SIZE],
         };
 
@@ -651,7 +907,7 @@ mod tests {
 
                     initial_mint: Unit::from_units(u128::MAX),
 
-                    mint_authority: Owner::Address(owner),
+                    mint_authority: Owner::Program(owner),
 
                     nonce: 1,
                 }),
@@ -670,7 +926,7 @@ mod tests {
 
                     nonce: 1,
 
-                    recipient: Owner::Address(owner),
+                    recipient: Owner::Program(owner),
 
                     amount: Unit::from_units(1),
                 }),
@@ -698,7 +954,7 @@ mod tests {
 
                     nonce: 0,
 
-                    recipient: Owner::Address(owner),
+                    recipient: Owner::Program(owner),
 
                     amount: Unit::from_units(1),
                 }),
@@ -719,8 +975,8 @@ mod tests {
     fn generated_asset_lifecycles_preserve_balances_supply_and_exact_rollback() {
         for seed in 1..=16u64 {
             let owners = [
-                Address([1; crypto::ADDRESS_SIZE]),
-                Address([2; crypto::ADDRESS_SIZE]),
+                ProgramId([1; crypto::PROGRAM_ID_SIZE]),
+                ProgramId([2; crypto::PROGRAM_ID_SIZE]),
             ];
 
             let mut state = AssetState::default();
@@ -736,12 +992,12 @@ mod tests {
 
                         initial_mint: Unit::from_units(1_000),
 
-                        mint_authority: Owner::Address(owners[0]),
+                        mint_authority: Owner::Program(owners[0]),
 
                         nonce: seed,
                     }),
                     ExecutionContext {
-                        actor: Owner::Address(owners[0]),
+                        actor: Owner::Program(owners[0]),
                         commitment: [0; HASH_SIZE],
                     },
                 )
@@ -779,7 +1035,7 @@ mod tests {
                 let inputs = state
                     .shares
                     .iter()
-                    .filter(|(_, share)| share.owner == Owner::Address(owners[selected]))
+                    .filter(|(_, share)| share.owner == Owner::Program(owners[selected]))
                     .map(|(id, _)| *id)
                     .collect::<Vec<_>>();
 
@@ -800,7 +1056,7 @@ mod tests {
 
                             nonce,
 
-                            recipient: Owner::Address(owners[selected]),
+                            recipient: Owner::Program(owners[selected]),
 
                             amount: Unit::from_units(amount.into()),
                         }),
@@ -812,13 +1068,13 @@ mod tests {
                     let change = balances[selected] - amount;
 
                     let mut outputs = vec![AssetOutput::new(
-                        Owner::Address(owners[1 - selected]),
+                        Owner::Program(owners[1 - selected]),
                         Unit::from_units(amount.into()),
                     )];
 
                     if change > 0 {
                         outputs.push(AssetOutput::new(
-                            Owner::Address(owners[selected]),
+                            Owner::Program(owners[selected]),
                             Unit::from_units(change.into()),
                         ));
                     }
@@ -858,11 +1114,19 @@ mod tests {
                     )
                 };
 
+                assert_sparse_matches_full(
+                    &state,
+                    &call,
+                    ExecutionContext {
+                        actor: Owner::Program(signer),
+                        commitment,
+                    },
+                );
                 let journal = state
                     .apply(
                         &call,
                         ExecutionContext {
-                            actor: Owner::Address(signer),
+                            actor: Owner::Program(signer),
                             commitment,
                         },
                     )
@@ -872,7 +1136,7 @@ mod tests {
                     let actual: u128 = state
                         .shares
                         .values()
-                        .filter(|share| share.owner == Owner::Address(*owner))
+                        .filter(|share| share.owner == Owner::Program(*owner))
                         .map(|share| share.amount.as_units())
                         .sum();
 
@@ -918,12 +1182,12 @@ mod tests {
     #[test]
 
     fn lifecycle_authorization_conservation_and_rollback() {
-        let owner = Address::from_bytes([1; crypto::ADDRESS_SIZE]);
+        let owner = ProgramId::from_bytes([1; crypto::PROGRAM_ID_SIZE]);
 
-        let receiver = Address::from_bytes([2; crypto::ADDRESS_SIZE]);
+        let receiver = ProgramId::from_bytes([2; crypto::PROGRAM_ID_SIZE]);
 
         let context = |signer, byte| ExecutionContext {
-            actor: Owner::Address(signer),
+            actor: Owner::Program(signer),
             commitment: [byte; HASH_SIZE],
         };
 
@@ -936,7 +1200,7 @@ mod tests {
 
             initial_mint: Unit::from_units(40),
 
-            mint_authority: Owner::Address(owner),
+            mint_authority: Owner::Program(owner),
 
             nonce: 7,
         };
@@ -948,8 +1212,8 @@ mod tests {
         let metadata = Metadata::new(
             register.name,
             register.max_supply,
-            Owner::Address(owner),
-            Owner::Address(owner),
+            Owner::Program(owner),
+            Owner::Program(owner),
         )
         .unwrap();
 
@@ -962,7 +1226,7 @@ mod tests {
 
             nonce: 1,
 
-            recipient: Owner::Address(owner),
+            recipient: Owner::Program(owner),
 
             amount: Unit::from_units(20),
         });
@@ -986,7 +1250,7 @@ mod tests {
             inputs: vec![first, second],
 
             outputs: vec![AssetOutput::new(
-                Owner::Address(receiver),
+                Owner::Program(receiver),
                 Unit::from_units(60),
             )],
         });
@@ -1006,7 +1270,7 @@ mod tests {
 
         assert_eq!(
             state.shares.get(&received).unwrap().owner,
-            Owner::Address(receiver)
+            Owner::Program(receiver)
         );
 
         state.rollback(journal);

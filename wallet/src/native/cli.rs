@@ -1,4 +1,4 @@
-use super::history::{fetch_address_history, parse_history_limit, print_history_page};
+use super::history::{fetch_program_id_history, parse_history_limit, print_history_page};
 use super::*;
 
 pub(super) fn interactive_menu() -> Result<(), String> {
@@ -7,7 +7,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         println!("XPARQ Wallet");
         println!("1. Create Wallet");
         println!("2. Import Wallet");
-        println!("3. Show Address");
+        println!("3. Show Program ID");
         println!("4. Show Balance");
         println!("5. Transaction History");
         println!("6. UTXO");
@@ -37,7 +37,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
             }
             "3" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
-                print_address(&["--wallet".into(), path])?;
+                print_program_id(&["--wallet".into(), path])?;
             }
             "4" => {
                 let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
@@ -101,8 +101,8 @@ fn interactive_program_assets() -> Result<(), String> {
 }
 
 fn interactive_asset_recipient() -> Result<[String; 2], String> {
-    let recipient = prompt("Recipient address")?;
-    address_from_string(&recipient).map_err(|error| error.to_string())?;
+    let recipient = prompt("Recipient Program ID")?;
+    program_id_from_string(&recipient).map_err(|error| error.to_string())?;
     Ok(["--to".into(), recipient])
 }
 
@@ -132,14 +132,15 @@ fn interactive_history() -> Result<(), String> {
     let limit = parse_history_limit(&limit_text)?;
     let bytes =
         Zeroizing::new(fs::read(&path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
+    let program_id =
+        kernel::crypto::program_id_to_string(&wallet_program_id_from_file_bytes(&bytes)?);
 
     let mut before: Option<String> = None;
     let mut previous = Vec::<Option<String>>::new();
 
     loop {
         println!();
-        let history = fetch_address_history(&rpc, &address, limit, before.as_deref())?;
+        let history = fetch_program_id_history(&rpc, &program_id, limit, before.as_deref())?;
         let next_cursor = print_history_page(history);
 
         println!();
@@ -173,8 +174,8 @@ fn interactive_wallet_query(query: fn(&[String]) -> Result<(), String>) -> Resul
 
 fn interactive_spend() -> Result<(), String> {
     let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
-    let recipient = prompt("Recipient Address")?;
-    address_from_string(&recipient).map_err(|error| error.to_string())?;
+    let recipient = prompt("Recipient Program ID")?;
+    program_id_from_string(&recipient).map_err(|error| error.to_string())?;
     let mut args = vec![
         "--to".into(),
         recipient,
@@ -192,15 +193,15 @@ fn interactive_spend() -> Result<(), String> {
 
 fn interactive_block_explorer() -> Result<(), String> {
     let rpc = prompt_default("RPC", DEFAULT_RPC_ADDR)?;
-    println!("1. Address activity");
+    println!("1. Program activity");
     println!("2. Transaction by Hash");
     println!("3. Latest blocks");
     println!("4. Block by height");
     let response: serde_json::Value = match prompt("Select")?.as_str() {
         "1" => {
-            let address = prompt("Address")?;
-            address_from_string(&address).map_err(|_| "invalid address".to_string())?;
-            http_get_json(&rpc, &format!("/explorer/address/{address}"))?
+            let program_id = prompt("Program ID")?;
+            program_id_from_string(&program_id).map_err(|_| "invalid program_id".to_string())?;
+            http_get_json(&rpc, &format!("/explorer/program/{program_id}"))?
         }
         "2" => {
             let hash = prompt("Hash")?;
@@ -252,10 +253,13 @@ pub(super) fn create_wallet(args: &[String]) -> Result<(), String> {
     let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
     let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, account)?;
     wallet.mnemonic = Some(mnemonic.to_string());
-    let address = wallet.address;
+    let program_id = wallet.program_id;
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
-    println!("address: {}", kernel::crypto::address_to_string(&address));
+    println!(
+        "Program ID: {}",
+        kernel::crypto::program_id_to_string(&program_id)
+    );
     println!("mnemonic: {}", mnemonic.as_str());
     println!("wallet: {path}");
     Ok(())
@@ -267,10 +271,13 @@ pub(super) fn restore_wallet(args: &[String]) -> Result<(), String> {
     let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
     let mut wallet = account_wallet_from_bip39_mnemonic(phrase, account)?;
     wallet.mnemonic = Some(phrase.to_string());
-    let address = wallet.address;
+    let program_id = wallet.program_id;
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
-    println!("address: {}", kernel::crypto::address_to_string(&address));
+    println!(
+        "Program ID: {}",
+        kernel::crypto::program_id_to_string(&program_id)
+    );
     println!("wallet: {path}");
     Ok(())
 }
@@ -285,12 +292,12 @@ fn signature_account_option(args: &[String]) -> Result<Option<Signature>, String
         .transpose()
 }
 
-pub(super) fn print_address(args: &[String]) -> Result<(), String> {
+pub(super) fn print_program_id(args: &[String]) -> Result<(), String> {
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = wallet_address_from_file_bytes(&bytes)?;
-    println!("Address: {}", kernel::crypto::address_to_string(&address));
+    let program_id = wallet_program_id_from_file_bytes(&bytes)?;
+    println!("Program ID: {program_id}");
     Ok(())
 }
 
@@ -317,6 +324,9 @@ pub(super) fn format_asset_amount(value: &str, decimals: u8) -> Result<String, S
 }
 
 fn human_label(key: &str) -> String {
+    if key == "signer" {
+        return "Signer Program ID".into();
+    }
     key.split('_')
         .map(|part| match part {
             "id" => "ID".to_string(),
@@ -358,6 +368,19 @@ fn print_human_json_value(label: Option<&str>, value: &serde_json::Value, indent
             }
         }
         serde_json::Value::Number(value) => {
+            if label == Some("program_id") {
+                let name = match value.as_u64() {
+                    Some(0) => Some("monetary"),
+                    Some(1) => Some("monetary legacy route"),
+                    Some(2) => Some("VM"),
+                    _ => None,
+                };
+                match name {
+                    Some(name) => println!("{padding}System Program: {name} ({value})"),
+                    None => println!("{padding}System Program: {value}"),
+                }
+                return;
+            }
             if let Some(label) = label {
                 println!("{padding}{}: {value}", human_label(label));
             } else {
@@ -365,6 +388,13 @@ fn print_human_json_value(label: Option<&str>, value: &serde_json::Value, indent
             }
         }
         serde_json::Value::String(value) => {
+            if label == Some("coin_contract")
+                && value.len() == 64
+                && value.bytes().all(|byte| byte == b'0')
+            {
+                println!("{padding}Currency: XPQ (native coin)");
+                return;
+            }
             if let Some(label) = label {
                 println!("{padding}{}: {value}", human_label(label));
             } else {
@@ -396,6 +426,13 @@ fn print_human_json_value(label: Option<&str>, value: &serde_json::Value, indent
             } else {
                 indent
             };
+
+            if values.len() == 2 && values.get("type").and_then(|v| v.as_str()) == Some("program") {
+                if let Some(id) = values.get("value").and_then(|v| v.as_str()) {
+                    println!("{}Owner Program ID: {id}", " ".repeat(child_indent));
+                    return;
+                }
+            }
 
             for (key, value) in values {
                 print_human_json_value(Some(key), value, child_indent);

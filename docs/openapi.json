@@ -10,7 +10,7 @@
         "summary": "Get node and chain status",
         "responses": {
           "200": {
-            "description": "Node status"
+            "description": "Node status, including minimum_chain_work (512-bit hex), minimum_chain_weight (decimal u64 string), and meets_chain_minimums (boolean) for the configured local sync policy"
           }
         }
       }
@@ -99,12 +99,12 @@
         "description": "Request bytes are a draft AuthorizedDeployProgram before signing. Burn is in raw XPQ units; submission revalidates the quote."
       }
     },
-    "/balance/{address}": {
+    "/program/balance/{program_id}": {
       "get": {
         "summary": "Get account balances",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Address"
+            "$ref": "#/components/parameters/ProgramId"
           }
         ],
         "responses": {
@@ -114,17 +114,17 @@
         }
       }
     },
-    "/account/{address}": {
+    "/program/account/{program_id}": {
       "get": {
-        "summary": "Get account UTXOs",
+        "summary": "Get paginated program-owned UTXOs, balances, and application state",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Address"
+            "$ref": "#/components/parameters/ProgramId"
           }
         ],
         "responses": {
           "200": {
-            "description": "Account state"
+            "description": "program_id, policy, nullable state_value, total/coin_balance in zeno, paginated utxos/coins, next_utxo_cursor, utxo_snapshot, program_assets and asset_shares"
           }
         }
       }
@@ -150,9 +150,42 @@
         }
       }
     },
+    "/program/state/{program_id}/{key}": {
+      "get": {
+        "summary": "Read one public key/value entry from a deployed program",
+        "parameters": [
+          {
+            "name": "program_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{2}){1,128}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "program_id, key, nullable hex value, canonical height and tip_hash"
+          },
+          "400": {
+            "description": "Invalid ID/key or unknown program"
+          }
+        }
+      }
+    },
     "/program/quote": {
       "post": {
-        "summary": "Quote state growth and VM transfer settlement for a signed Program transaction without submitting it",
+        "summary": "Quote state growth and bounded VM application execution for a signed Program transaction without submitting it",
         "requestBody": {
           "required": true,
           "content": {
@@ -166,13 +199,13 @@
         },
         "responses": {
           "200": {
-            "description": "created_state_weight in bytes, vm_fuel, vm_created_coin_utxos, vm_consumed_coin_utxos, and canonical tip_hash; exact payment burn is not checked during quote"
+            "description": "created_state_weight in bytes, vm_fuel, vm_created_coin_utxos, vm_consumed_coin_utxos, decimal-string vm_return_value (null for non-VM calls), and canonical tip_hash; exact payment burn is not checked during quote"
           },
           "400": {
             "description": "Invalid Program quote request"
           }
         },
-        "description": "Verifies envelope authorization and previews asset state growth, VM fuel, and contract-owned transfers. Contract balance is checked; exact wallet payment burn is not checked."
+        "description": "Verifies envelope authorization and previews asset/program storage growth, shared VM fuel, and contract-owned monetary effects. VM quotes check payment input ownership/conservation and contract balances; exact wallet payment burn is not checked."
       }
     },
     "/program/asset/{asset}": {
@@ -190,7 +223,7 @@
         }
       }
     },
-    "/program/asset/{asset}/balance/{address}": {
+    "/program/asset/{asset}/balance/{program_id}": {
       "get": {
         "summary": "Get Program asset balance and shares",
         "parameters": [
@@ -198,7 +231,7 @@
             "$ref": "#/components/parameters/AssetId"
           },
           {
-            "$ref": "#/components/parameters/Address"
+            "$ref": "#/components/parameters/ProgramId"
           }
         ],
         "responses": {
@@ -239,17 +272,17 @@
         }
       }
     },
-    "/explorer/address/{address}": {
+    "/explorer/program/{program_id}": {
       "get": {
-        "summary": "Get address activity",
+        "summary": "Get program activity",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Address"
+            "$ref": "#/components/parameters/ProgramId"
           }
         ],
         "responses": {
           "200": {
-            "description": "Address activity"
+            "description": "Program activity"
           }
         }
       }
@@ -274,48 +307,25 @@
           }
         }
       }
-    },
-    "/program/account/{program}": {
-      "get": {
-        "summary": "Get a deployed contract coin balance, live coin and asset shares, and scalar state",
-        "parameters": [
-          {
-            "name": "program",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-fA-F]{64}$"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "program_id, state_value, coin_balance in zeno, coins, and asset_shares in base units"
-          },
-          "400": {
-            "description": "Invalid or unknown deployed program"
-          }
-        }
-      }
     }
   },
   "components": {
     "parameters": {
-      "Address": {
-        "name": "address",
-        "in": "path",
-        "required": true,
-        "schema": {
-          "type": "string"
-        }
-      },
       "AssetId": {
         "name": "asset",
         "in": "path",
         "required": true,
         "schema": {
           "$ref": "#/components/schemas/AssetId"
+        }
+      },
+      "ProgramId": {
+        "name": "program_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         }
       }
     },

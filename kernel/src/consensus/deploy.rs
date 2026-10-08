@@ -139,13 +139,13 @@ mod tests {
     use super::*;
     use crate::monetary::coin::{CoinOutput, CoinShare};
     use crate::program::{AccountAuthorization, CoinTransition, DeployProgram, deploy_program};
-    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+    use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
     #[test]
     fn optimized_quote_matches_legacy_burn_and_does_not_mutate_state() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x41; 32]));
         let public_key = seed.public_key();
-        let owner = address_from_public_key(&public_key).unwrap();
+        let owner = program_id_from_public_key(&public_key).unwrap();
         let mut code = b"XPVM".to_vec();
         code.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0, 0]);
         code.push(1);

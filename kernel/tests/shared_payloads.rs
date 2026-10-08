@@ -4,7 +4,7 @@ use kernel::{
     block::{Block, Emission, GENESIS_TARGET_BITS, Header, block_bytes, decode_block},
     common::{Height, Nonce},
     crypto::{
-        AccountSignatureScheme, Address, HashDomain, SigningSeed, address_from_public_key,
+        AccountSignatureScheme, ProgramId, HashDomain, SigningSeed, program_id_from_public_key,
         canonical_bytes, domain,
     },
     monetary::coin::{CoinOutput, CoinShare, Zeno},
@@ -23,7 +23,7 @@ fn deployment() -> DeployProgram {
     code.extend_from_slice(&7_i64.to_le_bytes());
     code.push(3);
     DeployProgram {
-        owner: Address::ZERO,
+        owner: ProgramId::ZERO,
         nonce: 1,
         code: code.into(),
     }
@@ -31,7 +31,7 @@ fn deployment() -> DeployProgram {
 
 #[derive(BorshSerialize)]
 struct OwnedDeploy {
-    owner: Address,
+    owner: ProgramId,
     nonce: u64,
     code: Vec<u8>,
 }
@@ -39,7 +39,7 @@ struct OwnedDeploy {
 struct OwnedRecord {
     code_hash: ProgramHash,
     code: Vec<u8>,
-    owner: Address,
+    owner: ProgramId,
     nonce: u64,
     deployed_at: Height,
     state_value: i64,
@@ -122,7 +122,7 @@ fn shared_code_preserves_owned_encoding_hash_and_registry_validation() {
 #[test]
 fn cloned_blocks_share_payload_until_mutation_without_changing_wire_bytes() {
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x75; 32]));
-    let owner = address_from_public_key(&seed.public_key()).unwrap();
+    let owner = program_id_from_public_key(&seed.public_key()).unwrap();
     let mut deploy = deployment();
     deploy.owner = owner;
     let op = BlockOperation::DeployProgram(Box::new(AuthorizedDeployProgram {
@@ -159,7 +159,7 @@ fn cloned_blocks_share_payload_until_mutation_without_changing_wire_bytes() {
     let hash = block.hash().unwrap();
     let mut fork = block.clone();
     assert!(Arc::ptr_eq(&block.body, &fork.body));
-    fork.body_mut().emission.as_mut().unwrap().to = Address::ZERO;
+    fork.body_mut().emission.as_mut().unwrap().to = ProgramId::ZERO;
     fork.refresh_commitments().unwrap();
     assert!(!Arc::ptr_eq(&block.body, &fork.body));
     assert_eq!(block.hash().unwrap(), hash);

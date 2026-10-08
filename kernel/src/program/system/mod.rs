@@ -5,4 +5,6 @@
 
 pub mod asset_program;
 pub mod coin_program;
+pub mod monetary;
+pub mod signature_policy;
 pub mod script;

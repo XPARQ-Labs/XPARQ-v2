@@ -8,9 +8,8 @@ uses kernel directly. Kernel has no dependency on extension.
 | [kernel monetary](../kernel/src/monetary/mod.rs) | Coin/asset types, checked monetary primitives and canonical asset state |
 | [kernel program](../kernel/src/program/mod.rs) | Authorization, preparation, system-call contracts, restricted hosts, deployed registry and VM |
 | [kernel ledger](../kernel/src/ledger/mod.rs) | Coin UTXOs, canonical state, atomic application, state roots and rollback |
-| [extension applications](../extension/src/applications.rs) | Installs XPQ and asset application implementations |
-| [coin application](../extension/src/coin_program/mod.rs) | XPQ transfer execution through CoinHost |
-| [asset application](../extension/src/asset_program/mod.rs) | Register/mint/transfer/burn dispatch through AssetHost |
+| [extension applications](../extension/src/applications.rs) | Installs the unified monetary application implementation |
+| [monetary application](../extension/src/monetary/mod.rs) | Shared monetary program: coin transfer and asset create/mint/transfer/burn through checked hosts |
 | [runtime](../runtime/src/main.rs) | Persistence, network, mempool, mining, RPC and application installation |
 | [wallet](../wallet/README.md) | Signing, payment selection and user workflows over RPC |
 
@@ -21,8 +20,9 @@ contract lives in kernel. A deployed program is validated XPVM bytecode stored
 in `LedgerState.programs`. These are different execution implementations behind
 ProgramCall dispatch; system applications have not been converted to bytecode.
 
-`SystemProgramId(u32)` selects XPQ=0, ASSET=1 or VM=2. `ProgramId` is a 32-byte
-hash identifying deployed code. The VM route carries the deployed hash as its
+`SystemProgramId(u32)` selects MONETARY=0 or VM=2 (route 1 is a legacy asset
+decoder alias). `ProgramId` is a 32-byte owner-instance identity, including
+stateless signature-policy instances and deployed programs. The VM route carries the deployed hash as its
 payload. Asset contract IDs identify asset records, not deployed programs.
 
 `LedgerState.extensions.assets` holds canonical asset records and shares in
@@ -49,3 +49,20 @@ also proposes fixed coin and asset payouts from the executing program’s own
 shares. Version 3 adds program-owned asset registration and minting; kernel binds
 authority to the executing program, selects mint nonces and checks lifetime supply.
 The kernel settles all effects atomically with caller payment and state changes. See [ProgramCall](PROGRAM_CALL.md) and [XPVM](XPVM.md).
+
+
+XPVM v4 adds typed calldata, authenticated immediate caller/signing context,
+conditional control flow, program-local key/value storage, dynamic monetary
+requests, and synchronous calls between deployed programs. The caller program
+cannot choose the callee's authenticated caller. Calls share fuel and rollback;
+active-frame reentrancy is rejected. These primitives allow new application
+bytecode without changing the compiled XPQ/asset applications or node binary.
+Kernel monetary validation remains authoritative. See [v4](XPVM.md#application-bytecode-v4).
+
+## Program ownership
+
+The ledger has one ownership variant: `Owner::Program(ProgramId)`. A wallet is
+an implicit instance of the system signature policy; its key identity determines
+its instance ID without deployment or stored account metadata. Deployed instances
+use their bytecode policy and cannot spend through the implicit signature path.
+See [ownership](OWNERSHIP.md) for resolution, authorization and compatibility.

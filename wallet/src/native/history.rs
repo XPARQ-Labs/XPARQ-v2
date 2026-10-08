@@ -12,8 +12,9 @@ pub(super) fn print_history(args: &[String]) -> Result<(), String> {
         .transpose()?;
     let bytes =
         Zeroizing::new(fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?);
-    let address = kernel::crypto::address_to_string(&wallet_address_from_file_bytes(&bytes)?);
-    let history = fetch_address_history(rpc, &address, limit, before)?;
+    let program_id =
+        kernel::crypto::program_id_to_string(&wallet_program_id_from_file_bytes(&bytes)?);
+    let history = fetch_program_id_history(rpc, &program_id, limit, before)?;
     let next_cursor = print_history_page(history);
 
     if let Some(cursor) = next_cursor {
@@ -44,13 +45,13 @@ pub(super) fn validate_history_cursor(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
-pub(super) fn fetch_address_history(
+pub(super) fn fetch_program_id_history(
     rpc: &str,
-    address: &str,
+    program_id: &str,
     limit: usize,
     before: Option<&str>,
-) -> Result<AddressHistoryResponse, String> {
-    let mut path = format!("/explorer/address/{address}?include_emissions=false&limit={limit}");
+) -> Result<ProgramHistoryResponse, String> {
+    let mut path = format!("/explorer/program/{program_id}?include_emissions=false&limit={limit}");
     if let Some(cursor) = before {
         path.push_str("&before=");
         path.push_str(cursor);
@@ -58,8 +59,8 @@ pub(super) fn fetch_address_history(
     http_get_json(rpc, &path)
 }
 
-pub(super) fn print_history_page(mut history: AddressHistoryResponse) -> Option<String> {
-    println!("Address: {}", history.address);
+pub(super) fn print_history_page(mut history: ProgramHistoryResponse) -> Option<String> {
+    println!("Program ID: {}", history.program_id);
     println!("Tip Height: {}", history.tip_height);
 
     let emission_count = history.emission_count;

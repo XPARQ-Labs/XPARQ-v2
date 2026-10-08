@@ -3,7 +3,7 @@
 The repository does not currently provide stake/unstake commands or a staking
 contract. XPVM v1 only supports NOP, PUSH_I64, ADD, RETURN, READ_STATE, and
 WRITE_STATE. The VM cannot lock or transfer XPQ/assets, read block height, or
-store staking positions per address. Deploying bytecode with a numeric state
+store staking positions per program. Deploying bytecode with a numeric state
 value therefore does not implement staking or rewards.
 
 ## Required operations

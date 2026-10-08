@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::program::{AccountAuthorization, system::script::call::ProgramCall};
-use crypto::Address;
+use crypto::ProgramId;
 
 mod payment_tests {
     use super::*;
@@ -16,12 +16,12 @@ mod payment_tests {
         monetary::coin::{CoinOutput, CoinShare, Zeno},
         program::{AuthorizedProgramEnvelope, AuthorizedProgramInvocation, CoinTransition},
     };
-    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+    use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
     #[test]
     fn payment_requires_exact_burn_and_binds_call_without_mutating_state() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([19; 32]));
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([7; 32]);
         let input = CoinShare::from_bytes([2; crypto::HASH16_SIZE]);
         let call = ProgramCall {
@@ -31,7 +31,7 @@ mod payment_tests {
                 name: "STAGED".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
-                mint_authority: crate::common::Owner::Address(signer),
+                mint_authority: crate::common::Owner::Program(signer),
                 nonce: 1,
             })
             .unwrap(),
@@ -42,7 +42,7 @@ mod payment_tests {
             .insert_coin(
                 input,
                 CoinUtxo {
-                    owner: crate::common::Owner::Address(signer),
+                    owner: crate::common::Owner::Program(signer),
                     amount: Zeno::from_zeno(1_000_000),
                 },
             )
@@ -79,7 +79,7 @@ mod payment_tests {
             .apply(
                 &decoded,
                 ExecutionContext {
- actor: crate::common::Owner::Address(signer),
+ actor: crate::common::Owner::Program(signer),
                     commitment: [1; 32],
                 },
             )
@@ -173,18 +173,18 @@ mod xpq_transfer_tests {
             CoinCharges, CoinTransition, program_invocation_commitment,
         },
     };
-    use crypto::{Signature, SigningSeed, address_from_public_key};
+    use crypto::{Signature, SigningSeed, program_id_from_public_key};
 
     fn fixture() -> (LedgerState, AuthorizedProgramInvocation, ChainContext) {
-        fixture_for_scheme(Signature::MlDsa44, Address([94; crypto::ADDRESS_SIZE]))
+        fixture_for_scheme(Signature::MlDsa44, ProgramId([94; crypto::PROGRAM_ID_SIZE]))
     }
 
     fn fixture_for_scheme(
         scheme: Signature,
-        recipient: Address,
+        recipient: ProgramId,
     ) -> (LedgerState, AuthorizedProgramInvocation, ChainContext) {
         let keys = SigningSeed::new(scheme, Box::new([91; 32]));
-        let owner = address_from_public_key(&keys.public_key()).unwrap();
+        let owner = program_id_from_public_key(&keys.public_key()).unwrap();
         let input = CoinShare::from_bytes([92; crypto::HASH16_SIZE]);
         let amount = 1_000_000;
         let mut state = LedgerState::default();
@@ -194,7 +194,7 @@ mod xpq_transfer_tests {
             .insert_coin(
                 input,
                 CoinUtxo {
-                    owner: crate::common::Owner::Address(owner),
+                    owner: crate::common::Owner::Program(owner),
                     amount: Zeno::from_zeno(amount),
                 },
             )
@@ -256,7 +256,7 @@ mod xpq_transfer_tests {
         let journal = state
             .apply_program_call(
                 prepared.invocation.clone(),
-                Address([95; crypto::ADDRESS_SIZE]),
+                ProgramId([95; crypto::PROGRAM_ID_SIZE]),
                 chain,
                 prepared.height,
             )
@@ -285,12 +285,12 @@ mod xpq_transfer_tests {
         changed.call.payload.push(0);
         assert!(changed.validate_structure().is_err());
         state
-            .apply_program_call(tx.clone(), Address([95; crypto::ADDRESS_SIZE]), chain, 1)
+            .apply_program_call(tx.clone(), ProgramId([95; crypto::PROGRAM_ID_SIZE]), chain, 1)
             .unwrap();
         let after = state.clone();
         assert!(
             state
-                .apply_program_call(tx, Address([95; crypto::ADDRESS_SIZE]), chain, 1)
+                .apply_program_call(tx, ProgramId([95; crypto::PROGRAM_ID_SIZE]), chain, 1)
                 .is_err()
         );
         assert_eq!(state, after);
@@ -300,7 +300,7 @@ mod xpq_transfer_tests {
     fn xpq_transfer_rejects_every_cross_scheme_authorization() {
         for owner_scheme in crypto::AccountSignatureScheme::ALL {
             let (mut state, tx, chain) =
-                fixture_for_scheme(owner_scheme, Address([94; crypto::ADDRESS_SIZE]));
+                fixture_for_scheme(owner_scheme, ProgramId([94; crypto::PROGRAM_ID_SIZE]));
             validate_consensus_call(tx.clone(), chain, 1, &state).unwrap();
             let before = state.clone();
             for attacker_scheme in crypto::AccountSignatureScheme::ALL {
@@ -308,7 +308,7 @@ mod xpq_transfer_tests {
                     continue;
                 }
                 let keys = SigningSeed::new(attacker_scheme, Box::new([91; 32]));
-                let attacker = address_from_public_key(&keys.public_key()).unwrap();
+                let attacker = program_id_from_public_key(&keys.public_key()).unwrap();
                 assert_ne!(attacker, tx.signer);
                 let mut forged = tx.clone();
                 let commitment = program_invocation_commitment(
@@ -334,7 +334,7 @@ mod xpq_transfer_tests {
                 ));
                 assert!(
                     state
-                        .apply_program_call(forged, Address([95; crypto::ADDRESS_SIZE]), chain, 1,)
+                        .apply_program_call(forged, ProgramId([95; crypto::PROGRAM_ID_SIZE]), chain, 1,)
                         .is_err()
                 );
                 assert_eq!(state, before);
@@ -363,7 +363,7 @@ mod xpq_transfer_tests {
                     state
                         .apply_program_call(
                             rewritten,
-                            Address([95; crypto::ADDRESS_SIZE]),
+                            ProgramId([95; crypto::PROGRAM_ID_SIZE]),
                             chain,
                             1,
                         )
@@ -377,19 +377,19 @@ mod xpq_transfer_tests {
     #[test]
     fn xpq_transfer_can_create_an_owner_with_a_different_scheme() {
         let recipient_keys = SigningSeed::new(Signature::MlDsa65, Box::new([99; 32]));
-        let recipient = address_from_public_key(&recipient_keys.public_key()).unwrap();
+        let recipient = program_id_from_public_key(&recipient_keys.public_key()).unwrap();
         let (mut state, tx, chain) = fixture_for_scheme(Signature::MlDsa44, recipient);
         let input = tx.payment.coin_parts().unwrap().0[0];
         let amount = tx.payment.coin_parts().unwrap().1[0].amount;
         validate_consensus_call(tx.clone(), chain, 1, &state).unwrap();
         state
-            .apply_program_call(tx, Address([95; crypto::ADDRESS_SIZE]), chain, 1)
+            .apply_program_call(tx, ProgramId([95; crypto::PROGRAM_ID_SIZE]), chain, 1)
             .unwrap();
         assert!(state.utxos.coin(&input).is_none());
         let transferred: Vec<_> = state
             .utxos
             .coins()
-            .filter(|(_, coin)| coin.owner == crate::common::Owner::Address(recipient))
+            .filter(|(_, coin)| coin.owner == crate::common::Owner::Program(recipient))
             .collect();
         assert_eq!(transferred.len(), 1);
         assert_eq!(transferred[0].1.amount, amount);
@@ -418,7 +418,7 @@ mod xpq_transfer_tests {
             .insert_coin(
                 input,
                 CoinUtxo {
-                    owner: crate::common::Owner::Address(Address([97; crypto::ADDRESS_SIZE])),
+                    owner: crate::common::Owner::Program(ProgramId([97; crypto::PROGRAM_ID_SIZE])),
                     amount: Zeno::from_zeno(1_000_000),
                 },
             )

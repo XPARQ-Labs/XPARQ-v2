@@ -22,8 +22,9 @@ pub enum TransferError<E> {
     OutputIndexOverflow,
 }
 
-/// XPQ.Transfer uses the envelope funding field as its transfer data.
-/// An empty payload prevents an ambiguous second set of inputs or outputs.
+/// Compatibility decoder for native coin transfers. Monetary calls use a
+/// single coin-selector byte; the historical empty payload is also accepted.
+/// Neither form supplies a second set of inputs or outputs.
 pub fn decode(
     opcode: u8,
     payload: &[u8],
@@ -32,18 +33,14 @@ pub fn decode(
     if opcode != TRANSFER {
         return Err(ProgramError::UnknownOpcode);
     }
-    if !payload.is_empty() {
+    if !payload.is_empty() && payload != [0] {
         return Err(ProgramError::InvalidPayload);
     }
     Ok(())
 }
 
 pub fn transfer_call() -> crate::program::system::script::call::ProgramCall {
-    crate::program::system::script::call::ProgramCall {
-        program: crate::program::system::script::call::SystemProgramId::XPQ,
-        opcode: TRANSFER,
-        payload: Vec::new(),
-    }
+    crate::program::system::monetary::transfer_coin()
 }
 
 #[cfg(test)]
@@ -52,7 +49,8 @@ mod tests {
     #[test]
     fn native_transfer_rejects_unknown_methods_and_duplicate_payload_data() {
         assert!(decode(TRANSFER, &[]).is_ok());
-        assert!(decode(TRANSFER, &[0]).is_err());
+        assert!(decode(TRANSFER, &[0]).is_ok());
+        assert!(decode(TRANSFER, &[0, 0]).is_err());
         assert!(decode(2, &[]).is_err());
     }
 }

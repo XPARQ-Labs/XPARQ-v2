@@ -9,7 +9,7 @@ use crate::{
     monetary::coin::{CoinOutput, Zeno},
 };
 
-use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
+use crypto::{PROGRAM_ID_SIZE, ProgramId, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
 
 pub const WBDA_WINDOW: usize = 2_500;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
@@ -185,7 +185,7 @@ pub fn block_emission_for_height(height: Height) -> Zeno {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidatedEmission {
-    recipient: Address,
+    recipient: ProgramId,
     subsidy: Zeno,
     miner_emission: Zeno,
     protocol_burn: Zeno,
@@ -193,7 +193,7 @@ pub struct ValidatedEmission {
 }
 
 impl ValidatedEmission {
-    pub const fn recipient(self) -> Address {
+    pub const fn recipient(self) -> ProgramId {
         self.recipient
     }
 
@@ -284,23 +284,38 @@ pub fn expected_emission_for_height(height: Height) -> Zeno {
 }
 
 pub const STATE_BURN_ALGORITHM: &str = "xparq-canonical-archival-and-net-coin-state-growth-burn";
-pub const STATE_BURN_RATE_ZENO_PER_BYTE: u64 = 8;
+pub const STATE_BURN_RATE_ZENO_PER_BYTE: u64 = 1;
 
+// Borsh wire widths, not Rust struct sizes (which may contain padding).
+const BORSH_U32_BYTES: usize = 4;
+const BORSH_U64_BYTES: usize = 8;
 const BORSH_OPTION_TAG_BYTES: usize = 1;
-const BORSH_VEC_LENGTH_BYTES: usize = core::mem::size_of::<u32>();
+const BORSH_OWNER_TAG_BYTES: usize = 1;
+const BORSH_VEC_LENGTH_BYTES: usize = BORSH_U32_BYTES;
 
-pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (3 * HASH_SIZE
-    + 2 * core::mem::size_of::<u32>()
-    + core::mem::size_of::<u64>()
-    + core::mem::size_of::<u64>()
-    + BORSH_OPTION_TAG_BYTES
-    + ADDRESS_SIZE
-    + core::mem::size_of::<u64>()
+// Header: previous_hash + merkle_root + state_root (three 32-byte hashes),
+// target_bits + block_weight (two u32s), and nonce (u64).
+const BLOCK_HEADER_ARCHIVAL_BYTES: usize = 3 * HASH_SIZE + 2 * BORSH_U32_BYTES + BORSH_U64_BYTES;
+const BLOCK_HEIGHT_ARCHIVAL_BYTES: usize = BORSH_U64_BYTES;
+const BLOCK_EMISSION_ARCHIVAL_BYTES: usize =
+    BORSH_OPTION_TAG_BYTES + PROGRAM_ID_SIZE + BORSH_U64_BYTES;
+
+/// Exact canonical Borsh size of a non-genesis block with emission and no operations.
+/// Transaction operation bytes are charged separately to their callers.
+pub const EMPTY_BLOCK_ARCHIVAL_BYTES: u64 = (BLOCK_HEADER_ARCHIVAL_BYTES
+    + BLOCK_HEIGHT_ARCHIVAL_BYTES
+    + BLOCK_EMISSION_ARCHIVAL_BYTES
     + BORSH_VEC_LENGTH_BYTES) as u64;
 
-/// Canonical coin UTXO: XPQ key + amount + owner.
-pub const COIN_UTXO_STATE_WEIGHT: u64 =
-    (crate::monetary::coin::CoinShare::SIZE + core::mem::size_of::<u64>() + 1 + ADDRESS_SIZE) as u64;
+// Every monetary owner encodes one ProgramId. Wallet display identities have
+// the same width, but are not a distinct ownership variant.
+const_assert!(HASH_SIZE == PROGRAM_ID_SIZE);
+
+/// Exact canonical Borsh key/value size: share ID + Zeno(u64) + Owner(tag + payload).
+pub const COIN_UTXO_STATE_WEIGHT: u64 = (crate::monetary::coin::CoinShare::SIZE
+    + BORSH_U64_BYTES
+    + BORSH_OWNER_TAG_BYTES
+    + PROGRAM_ID_SIZE) as u64;
 
 pub const EMISSION_UTXO_STATE_GROWTH_BURN: Zeno =
     Zeno::from_zeno(COIN_UTXO_STATE_WEIGHT * STATE_BURN_RATE_ZENO_PER_BYTE);
@@ -408,3 +423,143 @@ impl fmt::Display for BurnError {
 }
 
 impl StdError for BurnError {}
+
+#[cfg(test)]
+mod state_burn_tests {
+    use super::*;
+    use crate::{
+        block::{Emission, block_bytes, block_header_bytes},
+        common::{Nonce, Owner},
+        ledger::CoinUtxo,
+        monetary::coin::CoinShare,
+        program::ProgramId,
+    };
+
+    #[test]
+    fn archival_and_utxo_weights_match_actual_borsh_encoding() {
+        let block = Block::from_protocol_operations(
+            Height(1),
+            Hash::ZERO,
+            crate::consensus::TARGET_BITS_START,
+            Nonce(0),
+            Some(Emission::new(ProgramId::ZERO, Zeno::from_zeno(1))),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            block_header_bytes(&block.header).unwrap().len(),
+            BLOCK_HEADER_ARCHIVAL_BYTES
+        );
+        assert_eq!(
+            block_bytes(&block).unwrap().len() as u64,
+            EMPTY_BLOCK_ARCHIVAL_BYTES
+        );
+        assert_eq!(EMPTY_BLOCK_ARCHIVAL_BYTES, 165);
+        for owner in [
+            Owner::Program(ProgramId::ZERO),
+            Owner::Program(ProgramId::from_bytes([0; HASH_SIZE])),
+        ] {
+            let entry = (
+                CoinShare::from_bytes([0; CoinShare::SIZE]),
+                CoinUtxo {
+                    amount: Zeno::ONE,
+                    owner,
+                },
+            );
+            assert_eq!(
+                canonical_bytes(&entry).unwrap().len() as u64,
+                COIN_UTXO_STATE_WEIGHT
+            );
+        }
+        assert_eq!(COIN_UTXO_STATE_WEIGHT, 57);
+        assert_eq!(
+            MINER_PROTOCOL_BURN.as_zeno(),
+            (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_BYTE
+        );
+        assert_eq!(
+            MINER_PROTOCOL_BURN,
+            EMPTY_BLOCK_ARCHIVAL_BURN
+                .checked_add(EMISSION_UTXO_STATE_GROWTH_BURN)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn burn_charges_actual_bytes_and_only_positive_net_state_growth() {
+        let growth = StateTransitionWeight {
+            created_coin_utxos: 3,
+            consumed_coin_utxos: 1,
+            created_state_weight: 100,
+        };
+        let burn = ProtocolBurn::for_program_call(growth, 1_000).unwrap();
+        assert_eq!(
+            burn.archival.as_zeno(),
+            1_000 * STATE_BURN_RATE_ZENO_PER_BYTE
+        );
+        assert_eq!(
+            burn.state_growth.as_zeno(),
+            (2 * COIN_UTXO_STATE_WEIGHT + 100) * STATE_BURN_RATE_ZENO_PER_BYTE
+        );
+        let shrinking = StateTransitionWeight {
+            created_coin_utxos: 1,
+            consumed_coin_utxos: 3,
+            created_state_weight: 0,
+        };
+        let burn = ProtocolBurn::for_program_call(shrinking, 1_000).unwrap();
+        assert_eq!(burn.state_growth, Zeno::ZERO);
+        assert_eq!(burn.total(), Ok(burn.archival)); // Consolidation cannot erase history cost.
+        assert!(
+            validate_exact_burn(Zeno::from_zeno(burn.archival.as_zeno() - 1), burn.archival)
+                .is_err()
+        );
+        assert!(
+            validate_exact_burn(Zeno::from_zeno(burn.archival.as_zeno() + 1), burn.archival)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn burn_rejects_weight_and_total_overflow_instead_of_wrapping() {
+        assert_eq!(
+            StateTransitionWeight {
+                created_coin_utxos: u64::MAX,
+                consumed_coin_utxos: 0,
+                created_state_weight: 0
+            }
+            .state_growth_burn(),
+            Err(BurnError::WeightOverflow)
+        );
+        assert_eq!(
+            StateTransitionWeight {
+                created_coin_utxos: 1,
+                consumed_coin_utxos: 0,
+                created_state_weight: u64::MAX
+            }
+            .state_growth_burn(),
+            Err(BurnError::WeightOverflow)
+        );
+        let burn = ProtocolBurn {
+            archival: Zeno::from_zeno(u64::MAX),
+            state_growth: Zeno::ONE,
+        };
+        assert_eq!(burn.total(), Err(BurnError::ZenoOverflow));
+        // The maximum size charge can fit at 1 zeno/byte, but adding any state
+        // growth must still fail checked arithmetic.
+        if STATE_BURN_RATE_ZENO_PER_BYTE == 1 {
+            let burn = ProtocolBurn::for_program_call(
+                StateTransitionWeight {
+                    created_state_weight: 1,
+                    ..Default::default()
+                },
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(burn.total(), Err(BurnError::ZenoOverflow));
+        } else {
+            assert_eq!(
+                ProtocolBurn::for_program_call(StateTransitionWeight::default(), u64::MAX),
+                Err(BurnError::ZenoOverflow)
+            );
+        }
+    }
+}

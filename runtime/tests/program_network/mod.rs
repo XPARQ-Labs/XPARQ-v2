@@ -24,7 +24,7 @@ fn signed_program(rpc: &str, owner: &AccountWallet, instruction: &AssetCall) -> 
         opcode: opcode as u8,
         payload,
     };
-    let account = account(rpc, &address_to_string(&owner.address)).unwrap();
+    let account = account(rpc, &program_id_to_string(&owner.program_id)).unwrap();
     let input = account["utxos"]
         .as_array()
         .unwrap()
@@ -51,10 +51,10 @@ fn signed_program(rpc: &str, owner: &AccountWallet, instruction: &AssetCall) -> 
         .unwrap()
         .as_zeno();
         let payment = CoinTransition::coin_with_charges(
-            owner.address,
+            owner.program_id,
             vec![id],
             vec![CoinOutput::new(
-                owner.address,
+                owner.program_id,
                 Zeno::from_zeno(amount.checked_sub(burn + fee).unwrap()),
             )],
             CoinCharges::new(Zeno::from_zeno(fee)),
@@ -112,12 +112,12 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
     let cp = free_address();
     let cr = free_address();
     let owner = sender_wallet();
-    let owner_address = address_to_string(&owner.address);
-    let recipient = address_from_public_key(
+    let owner_program_id = program_id_to_string(&owner.program_id);
+    let recipient = program_id_from_public_key(
         &SigningSeed::new(Signature::MlDsa44, Box::new([72; 32])).public_key(),
     )
     .unwrap();
-    let recipient_address = address_to_string(&recipient);
+    let recipient_address = program_id_to_string(&recipient);
     mine(&a, 1);
     let mut an = start_node(&a, &ap, &ar, &[], None);
     wait_for_status(&ar, |s| s["tip_height"] == 1);
@@ -134,14 +134,14 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                 name: "GOSSIPPROGRAM".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(40),
-                mint_authority: kernel::common::Owner::Address(owner.address),
+                mint_authority: kernel::common::Owner::Program(owner.program_id),
                 nonce: 17,
             })
         } else {
             let asset = asset.unwrap();
             let balance = http_get(
                 &ar,
-                &format!("/program/asset/{asset}/balance/{owner_address}"),
+                &format!("/program/asset/{asset}/balance/{owner_program_id}"),
             )
             .unwrap();
             let shares = balance["shares"].as_array().unwrap();
@@ -153,16 +153,16 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                 1 => AssetCall::Mint(Mint {
                     asset,
                     nonce: 1,
-                    recipient: kernel::common::Owner::Address(owner.address),
+                    recipient: kernel::common::Owner::Program(owner.program_id),
                     amount: Unit::from_units(20),
                 }),
                 2 => AssetCall::Transfer(Transfer {
                     asset,
                     inputs,
                     outputs: vec![
-                        AssetOutput::new(kernel::common::Owner::Address(owner.address), Unit::from_units(20)),
-                        AssetOutput::new(kernel::common::Owner::Address(owner.address), Unit::from_units(25)),
-                        AssetOutput::new(kernel::common::Owner::Address(recipient), Unit::from_units(15)),
+                        AssetOutput::new(kernel::common::Owner::Program(owner.program_id), Unit::from_units(20)),
+                        AssetOutput::new(kernel::common::Owner::Program(owner.program_id), Unit::from_units(25)),
+                        AssetOutput::new(kernel::common::Owner::Program(recipient), Unit::from_units(15)),
                     ],
                 }),
                 3 => AssetCall::Burn(Burn {
@@ -183,7 +183,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                     AssetCall::Transfer(Transfer {
                         asset,
                         inputs,
-                        outputs: vec![AssetOutput::new(kernel::common::Owner::Address(owner.address), Unit::from_units(40))],
+                        outputs: vec![AssetOutput::new(kernel::common::Owner::Program(owner.program_id), Unit::from_units(40))],
                     })
                 }
                 _ => unreachable!(),
@@ -197,7 +197,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
         let hash = hex::encode(tx.id().unwrap());
         assert_eq!(post_transaction(ingress, &tx)["hash"], hash);
         for rpc in [&ar, &br, &cr] {
-            wait_program_mempool(rpc, &owner_address, &input);
+            wait_program_mempool(rpc, &owner_program_id, &input);
         }
         hashes.push(hash);
         // The middle node mines a transaction it received exclusively through P2P.
@@ -213,7 +213,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
         }
         if step == 0 {
             asset = Some(
-                account(&ar, &owner_address).unwrap()["program_assets"][0]["asset"]
+                account(&ar, &owner_program_id).unwrap()["program_assets"][0]["asset"]
                     .as_str()
                     .unwrap()
                     .parse()
@@ -223,7 +223,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
         let asset = asset.unwrap();
         for route in [
             format!("/program/asset/{asset}"),
-            format!("/program/asset/{asset}/balance/{owner_address}"),
+            format!("/program/asset/{asset}/balance/{owner_program_id}"),
             format!("/program/asset/{asset}/balance/{recipient_address}"),
         ] {
             let expected = http_get(&br, &route).unwrap();
@@ -244,7 +244,7 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
     }
     let asset = asset.unwrap();
     let metadata_route = format!("/program/asset/{asset}");
-    let owner_route = format!("/program/asset/{asset}/balance/{owner_address}");
+    let owner_route = format!("/program/asset/{asset}/balance/{owner_program_id}");
     let recipient_route = format!("/program/asset/{asset}/balance/{recipient_address}");
     let routes = [&metadata_route, &owner_route, &recipient_route];
     let metadata = http_get(&ar, &metadata_route).unwrap();

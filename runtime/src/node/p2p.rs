@@ -305,6 +305,16 @@ fn synchronize_peer_database(
         mut stream,
     } = connection;
     let connected_address = stream.peer_addr().ok();
+    // TCP's initial request phase requires a locator. Close an ineligible
+    // outbound session before entering it, rather than sending block/discovery
+    // requests to a peer that is still waiting for headers.
+    if !super::chain_minimums::allows(
+        database,
+        Work::from_be_limbs(handshake.cumulative_work),
+        handshake.cumulative_weight,
+    )? {
+        return Err("peer chain is below configured work/weight minimums".into());
+    }
     let sync = synchronize_headers(database, &mut stream, &handshake)?;
     let verified = sync.headers.len();
     let preferred = sync.preferred;
@@ -498,7 +508,12 @@ pub(super) fn serve_block_requests(
                 response.push(INVENTORY_MESSAGE);
                 response.extend_from_slice(&encoded);
                 write_frame(stream, &response)?;
-                if inventory_preferred(&peer_inventory, &inventory) {
+                if super::chain_minimums::allows(
+                    database,
+                    Work::from_be_limbs(peer_inventory.cumulative_work),
+                    peer_inventory.cumulative_weight,
+                )? && inventory_preferred(&peer_inventory, &inventory)
+                {
                     return Ok(PeerSessionOutcome::ReverseSync(peer_inventory));
                 }
                 continue;

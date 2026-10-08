@@ -42,7 +42,7 @@ fn build_fixture(path: &Path, deployments: u64) -> Fixture {
         kernel::crypto::AccountSignatureScheme::MlDsa44,
         Box::new([0x73; 32]),
     );
-    let owner = address_from_public_key(&seed.public_key()).unwrap();
+    let owner = program_id_from_public_key(&seed.public_key()).unwrap();
     let context = kernel::genesis::chain_context().unwrap();
     let genesis = genesis_block().unwrap();
     let mut ledger = Ledger::new().with_applications(extension::SystemApplications);
@@ -57,7 +57,7 @@ fn build_fixture(path: &Path, deployments: u64) -> Fixture {
                 .state()
                 .utxos()
                 .coins()
-                .find(|(_, coin)| coin.owner == owner && coin.amount.as_zeno() > 50_000_000)
+                .find(|(_, coin)| coin.owner == kernel::common::Owner::Program(owner) && coin.amount.as_zeno() > 50_000_000)
                 .expect("fixture deployment funding");
             let amount = coin.amount.as_zeno();
             // A valid straight-line XPVM program, with nops before const/return.

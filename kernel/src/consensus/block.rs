@@ -3,7 +3,7 @@ use crate::{
     common::Height,
     consensus::{
         ConsensusError, PoWTarget, ValidatedEmission, authorize_emission,
-        expected_difficulty_for_height, verify_pow,
+        expected_difficulty_for_height, verify_pow, verify_pow_with_memory,
     },
 };
 
@@ -34,6 +34,23 @@ where
     state.commit_validated_block(validated)
 }
 
+/// Apply using a caller-owned consensus-sized PoW buffer. Every proof is still
+/// verified afresh; the buffer only avoids repeated allocations.
+pub fn apply_block_with_pow_memory<State>(
+    state: &mut State,
+    block: Block,
+    memory: &mut PoWMemory,
+) -> Result<(), State::Error>
+where
+    State: ApplyBlockState,
+{
+    if !state.consensus_chain().has_blocks() {
+        return Err(ConsensusError::GenesisRequired.into());
+    }
+    let validated = validate_block_for_apply_with_memory(&block, state.consensus_chain(), memory)?;
+    state.commit_validated_block(validated)
+}
+
 pub fn apply_genesis<State>(
     state: &mut State,
     block: Block,
@@ -52,7 +69,7 @@ where
         return Err(ConsensusError::WrongGenesis.into());
     }
 
-    let validated = validate_for_apply(&block, state.consensus_chain(), true)?;
+    let validated = validate_for_apply(&block, state.consensus_chain(), true, None)?;
 
     state.commit_validated_block(validated)
 }
@@ -81,20 +98,30 @@ pub fn validate_block_for_apply(
     block: &Block,
     chain: &Chain,
 ) -> Result<ValidatedBlock, ConsensusError> {
-    validate_for_apply(block, chain, true)
+    validate_for_apply(block, chain, true, None)
+}
+
+/// Same admission checks as validate_block_for_apply, with reusable PoW memory.
+pub fn validate_block_for_apply_with_memory(
+    block: &Block,
+    chain: &Chain,
+    memory: &mut PoWMemory,
+) -> Result<ValidatedBlock, ConsensusError> {
+    validate_for_apply(block, chain, true, Some(memory))
 }
 
 pub fn validate_candidate_for_apply(
     block: &Block,
     chain: &Chain,
 ) -> Result<ValidatedBlock, ConsensusError> {
-    validate_for_apply(block, chain, false)
+    validate_for_apply(block, chain, false, None)
 }
 
 fn validate_for_apply(
     block: &Block,
     chain: &Chain,
     enforce_pow: bool,
+    memory: Option<&mut PoWMemory>,
 ) -> Result<ValidatedBlock, ConsensusError> {
     block.validate_structure()?;
 
@@ -110,7 +137,10 @@ fn validate_for_apply(
         let expected_difficulty = expected_difficulty(chain, block.height())?;
 
         if enforce_pow {
-            Consensus::validate_pow_at_target_bits(block, expected_difficulty)?;
+            match memory {
+                Some(memory) => verify_pow_with_memory(&block.header, expected_difficulty, memory)?,
+                None => Consensus::validate_pow_at_target_bits(block, expected_difficulty)?,
+            }
         } else if block.target_bits() != expected_difficulty {
             return Err(ConsensusError::UnexpectedDifficulty);
         }

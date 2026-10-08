@@ -1,13 +1,13 @@
 use std::io::{self, Cursor, Read};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{Address, HASH_SIZE};
+use crypto::{HASH_SIZE, ProgramId};
 use kernel::{
     common::Height,
     operation::BlockOperation,
     program::{
-        DeployProgram, MAX_PROGRAM_CODE_SIZE, ProgramHash, ProgramId, ProgramRecord,
-        ProgramRegistry, deploy_program,
+        DeployProgram, MAX_PROGRAM_CODE_SIZE, ProgramHash, ProgramRecord, ProgramRegistry,
+        deploy_program,
         system::script::call::{ProgramCall, SystemProgramId},
     },
 };
@@ -19,7 +19,7 @@ fn deployment() -> DeployProgram {
     code.extend_from_slice(&7_u64.to_le_bytes());
     code.push(3);
     DeployProgram {
-        owner: Address::ZERO,
+        owner: ProgramId::ZERO,
         nonce: 1,
         code: code.into(),
     }
@@ -41,7 +41,7 @@ impl Read for PrefixOnly {
 #[test]
 fn oversized_code_prefixes_stop_before_payload_reads() {
     for length in [MAX_PROGRAM_CODE_SIZE as u32 + 1, u32::MAX] {
-        let mut prefix = borsh::to_vec(&(Address::ZERO, 1_u64)).unwrap();
+        let mut prefix = borsh::to_vec(&(ProgramId::ZERO, 1_u64)).unwrap();
         prefix.extend_from_slice(&length.to_le_bytes());
         assert_eq!(
             DeployProgram::deserialize_reader(&mut PrefixOnly(Cursor::new(prefix.clone())))
@@ -97,6 +97,7 @@ fn bounded_code_decoding_preserves_historical_field_encoding() {
             nonce: deploy.nonce,
             deployed_at: Height(1),
             state_value: -7,
+            storage: Default::default(),
         };
         let bytes = borsh::to_vec(&record).unwrap();
         assert_eq!(
@@ -150,6 +151,7 @@ fn deterministic_mutation_corpus_covers_truncation_and_canonical_decoding() {
         nonce: deploy.nonce,
         deployed_at: Height(1),
         state_value: 7,
+        storage: Default::default(),
     };
     check_corpus::<ProgramRecord>(&borsh::to_vec(&record).unwrap());
     let mut registry = ProgramRegistry::default();
@@ -167,7 +169,7 @@ fn deterministic_mutation_corpus_covers_truncation_and_canonical_decoding() {
 fn forged_maximum_registry_count_does_not_preallocate_entries() {
     // The decoder reads actual records sequentially and immediately encounters EOF.
     assert!(ProgramRegistry::try_from_slice(&u32::MAX.to_le_bytes()).is_err());
-    let mut prefix = borsh::to_vec(&(Address::ZERO, 1_u64)).unwrap();
+    let mut prefix = borsh::to_vec(&(ProgramId::ZERO, 1_u64)).unwrap();
     prefix.extend_from_slice(&(MAX_PROGRAM_CODE_SIZE as u32).to_le_bytes());
     assert!(DeployProgram::try_from_slice(&prefix).is_err());
 }

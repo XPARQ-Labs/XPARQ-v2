@@ -26,20 +26,18 @@ pub(crate) fn settle(
     commitment: AuthorizationCommitment,
     applications: &dyn ApplicationExecutor,
 ) -> Result<(CoinRollbackJournal, Option<AssetJournal>), StateError> {
+    settle_with_inputs(state, id, result, commitment, applications, None)
+}
+
+pub(crate) fn settle_with_inputs(
+    state: &mut LedgerState,
+    id: ProgramId,
+    result: &ExecutionResult,
+    commitment: AuthorizationCommitment,
+    applications: &dyn ApplicationExecutor,
+    selected: Option<&[CoinShare]>,
+) -> Result<(CoinRollbackJournal, Option<AssetJournal>), StateError> {
     let actor = Owner::Program(id);
-    for recipient in result
-        .coin_transfer
-        .iter()
-        .map(|r| r.recipient)
-        .chain(result.asset_transfer.iter().map(|(_, r)| r.recipient))
-        .chain(result.asset_mint.iter().map(|r| r.recipient))
-    {
-        if let Owner::Program(target) = recipient {
-            if state.programs.program(&target).is_none() {
-                return Err(StateError::InvalidTransition);
-            }
-        }
-    }
     let bytes = crypto::canonical_bytes(&(b"xparq:vm-transfer:v2", id, commitment))
         .map_err(|_| StateError::InvalidTransition)?;
     let origin = crypto::domain(crypto::HashDomain::AssetIntent, &bytes).into_bytes();
@@ -47,13 +45,33 @@ pub(crate) fn settle(
     if let Some(request) = result.coin_transfer {
         let mut total = Zeno::ZERO;
         let mut inputs = Vec::new();
-        for (share, value) in state
-            .utxos
-            .coins()
-            .filter(|(_, value)| value.owner == actor)
-            .take(MAX_TRANSFER_INPUTS)
-        {
-            inputs.push((share, *value));
+        let candidates = if let Some(ids) = selected {
+            if ids.len() > MAX_TRANSFER_INPUTS {
+                return Err(StateError::InvalidTransition);
+            }
+            ids.iter()
+                .map(|share| {
+                    let value = state
+                        .utxos
+                        .coin(share)
+                        .ok_or(StateError::InvalidTransition)?;
+                    if value.owner != actor {
+                        return Err(StateError::InvalidTransition);
+                    }
+                    Ok((*share, *value))
+                })
+                .collect::<Result<Vec<_>, StateError>>()?
+        } else {
+            state
+                .utxos
+                .coins()
+                .filter(|(_, value)| value.owner == actor)
+                .take(MAX_TRANSFER_INPUTS)
+                .map(|(share, value)| (share, *value))
+                .collect()
+        };
+        for (share, value) in candidates {
+            inputs.push((share, value));
             total = total
                 .checked_add(value.amount)
                 .ok_or(StateError::AmountOverflow)?;
@@ -263,7 +281,7 @@ mod tests {
             },
         },
     };
-    use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+    use crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key};
 
     fn code(asset: AssetContract, recipient: Owner) -> Vec<u8> {
         let mut code = b"XPVM".to_vec();
@@ -298,11 +316,11 @@ mod tests {
         call: ProgramCall,
         extra: Vec<CoinOutput>,
     ) -> AuthorizedProgramInvocation {
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let (input, value) = state
             .utxos
             .coins()
-            .filter(|(_, v)| v.owner == Owner::Address(signer))
+            .filter(|(_, v)| v.owner == Owner::Program(signer))
             .max_by_key(|(_, v)| v.amount)
             .unwrap();
         let amount = value.amount.as_zeno();
@@ -385,17 +403,17 @@ mod tests {
         ChainContext,
         ProgramId,
         AssetContract,
-        crypto::Address,
+        crypto::ProgramId,
     ) {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([0x71; 32]));
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
-        let receiver = crypto::Address([0x72; 32]);
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
+        let receiver = crypto::ProgramId([0x72; 32]);
         let chain = ChainContext::new([0x73; 32]);
         let metadata = Metadata::new(
             "VAULT".into(),
             Unit::from_units(100),
-            Owner::Address(signer),
-            Owner::Address(signer),
+            Owner::Program(signer),
+            Owner::Program(signer),
         )
         .unwrap();
         let asset = AssetContract::derive(&metadata, 1).unwrap();
@@ -405,7 +423,7 @@ mod tests {
             DeployProgram {
                 owner: signer,
                 nonce: 1,
-                code: code(asset, Owner::Address(receiver)).into(),
+                code: code(asset, Owner::Program(receiver)).into(),
             },
             Height(1),
         )
@@ -417,7 +435,7 @@ mod tests {
                 CoinShare::from_bytes([1; 16]),
                 CoinUtxo {
                     amount: initial,
-                    owner: Owner::Address(signer),
+                    owner: Owner::Program(signer),
                 },
             )
             .unwrap();
@@ -429,7 +447,7 @@ mod tests {
                 name: "VAULT".into(),
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(15),
-                mint_authority: Owner::Address(signer),
+                mint_authority: Owner::Program(signer),
                 nonce: 1,
             })
             .unwrap(),
@@ -476,7 +494,7 @@ mod tests {
     #[test]
     fn deployed_contract_receives_sends_both_values_and_rolls_back() {
         let (mut state, seed, chain, id, asset, receiver) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let before = state.clone();
         let restored = <LedgerState as borsh::BorshDeserialize>::try_from_slice(
             &borsh::to_vec(&state).unwrap(),
@@ -495,7 +513,7 @@ mod tests {
             state
                 .utxos
                 .coins()
-                .filter(|(_, v)| v.owner == Owner::Address(receiver))
+                .filter(|(_, v)| v.owner == Owner::Program(receiver))
                 .map(|(_, v)| v.amount.as_zeno())
                 .sum::<u64>(),
             7
@@ -515,7 +533,7 @@ mod tests {
                 .assets
                 .shares()
                 .values()
-                .filter(|v| v.owner == Owner::Address(receiver) && v.asset == asset)
+                .filter(|v| v.owner == Owner::Program(receiver) && v.asset == asset)
                 .map(|v| v.amount.as_units())
                 .sum::<u128>(),
             5
@@ -540,7 +558,7 @@ mod tests {
     #[test]
     fn direct_signer_cannot_spend_contract_coin_and_failed_asset_settlement_is_atomic() {
         let (mut state, seed, chain, id, _, _) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let input = state
             .utxos
             .coins()
@@ -582,7 +600,7 @@ mod tests {
             payload: borsh::to_vec(&Transfer {
                 asset: value.asset,
                 inputs: vec![*share],
-                outputs: vec![AssetOutput::new(Owner::Address(signer), value.amount)],
+                outputs: vec![AssetOutput::new(Owner::Program(signer), value.amount)],
             })
             .unwrap(),
         };
@@ -612,7 +630,7 @@ mod tests {
 
     fn issuance_program(
         state: &mut LedgerState,
-        owner: crypto::Address,
+        owner: crypto::ProgramId,
         register: Option<crate::program::vm::RegisterAssetRequest>,
         mint: Option<crate::program::vm::MintAssetRequest>,
     ) -> ProgramId {
@@ -676,7 +694,7 @@ mod tests {
     fn contract_registers_mints_repeatedly_and_rolls_back_all_asset_changes() {
         use crate::program::vm::{MintAssetRequest, RegisterAssetRequest};
         let (mut state, seed, chain, _, _, receiver) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let id = issuance_program(
             &mut state,
             signer,
@@ -689,7 +707,7 @@ mod tests {
             }),
             Some(MintAssetRequest {
                 asset: MintAssetTarget::Registered,
-                recipient: Owner::Address(receiver),
+                recipient: Owner::Program(receiver),
                 amount: Unit::from_units(5),
             }),
         );
@@ -703,7 +721,7 @@ mod tests {
         let caller_balance = |s: &LedgerState| {
             s.utxos
                 .coins()
-                .filter(|(_, v)| v.owner == Owner::Address(signer))
+                .filter(|(_, v)| v.owner == Owner::Program(signer))
                 .map(|(_, v)| v.amount.as_zeno())
                 .sum::<u64>()
         };
@@ -769,7 +787,7 @@ mod tests {
                 .sum::<u128>()
         };
         assert_eq!(balance(&state, actor), 1);
-        assert_eq!(balance(&state, Owner::Address(receiver)), 5);
+        assert_eq!(balance(&state, Owner::Program(receiver)), 5);
         assert_eq!(
             state
                 .utxos
@@ -803,7 +821,7 @@ mod tests {
             (11, 11, 2)
         );
         assert_eq!(balance(&state, actor), 1); // Initial mint is never repeated.
-        assert_eq!(balance(&state, Owner::Address(receiver)), 10);
+        assert_eq!(balance(&state, Owner::Program(receiver)), 10);
         let after_second = state.clone();
         let failed = unquoted(&state, &seed, chain, invocation(id));
         assert!(
@@ -828,7 +846,7 @@ mod tests {
     fn invalid_payment_and_direct_signer_mint_cannot_change_program_asset() {
         use crate::program::vm::{MintAssetRequest, RegisterAssetRequest};
         let (mut state, seed, chain, _, _, receiver) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let id = issuance_program(
             &mut state,
             signer,
@@ -841,7 +859,7 @@ mod tests {
             }),
             Some(MintAssetRequest {
                 asset: MintAssetTarget::Registered,
-                recipient: Owner::Address(receiver),
+                recipient: Owner::Program(receiver),
                 amount: Unit::from_units(2),
             }),
         );
@@ -869,7 +887,7 @@ mod tests {
             payload: borsh::to_vec(&Mint {
                 asset,
                 nonce: 2,
-                recipient: Owner::Address(signer),
+                recipient: Owner::Program(signer),
                 amount: Unit::from_units(1),
             })
             .unwrap(),
@@ -884,17 +902,17 @@ mod tests {
     }
 
     #[test]
-    fn mint_existing_asset_requires_program_authority_and_deployed_recipient() {
+    fn mint_existing_asset_requires_program_authority_and_accepts_implicit_recipient() {
         use crate::program::vm::MintAssetRequest;
         let (mut state, seed, chain, _, asset, receiver) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let id = issuance_program(
             &mut state,
             signer,
             None,
             Some(MintAssetRequest {
                 asset: MintAssetTarget::Existing(asset),
-                recipient: Owner::Address(receiver),
+                recipient: Owner::Program(receiver),
                 amount: Unit::from_units(2),
             }),
         );
@@ -905,7 +923,7 @@ mod tests {
         let metadata = Metadata::new(
             "EXTERNAL".into(),
             Unit::from_units(100),
-            Owner::Address(signer),
+            Owner::Program(signer),
             Owner::Program(id),
         )
         .unwrap();
@@ -978,7 +996,7 @@ mod tests {
                 commitment,
                 crate::program::application::Applications::default().executor()
             )
-            .is_err()
+            .is_ok()
         );
         assert_eq!(state, before);
     }
@@ -987,7 +1005,7 @@ mod tests {
     fn program_can_mint_u128_amounts_to_another_deployed_program() {
         use crate::program::vm::{MintAssetRequest, RegisterAssetRequest};
         let (mut state, seed, chain, recipient, _, miner) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let amount = Unit::from_units(u64::MAX as u128 + 1);
         let id = issuance_program(
             &mut state,
@@ -1036,7 +1054,7 @@ mod tests {
     fn failed_first_mint_discards_registration_and_payment() {
         use crate::program::vm::{MintAssetRequest, RegisterAssetRequest};
         let (mut state, seed, chain, _, _, receiver) = fixture();
-        let signer = address_from_public_key(&seed.public_key()).unwrap();
+        let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let id = issuance_program(
             &mut state,
             signer,
@@ -1049,7 +1067,7 @@ mod tests {
             }),
             Some(MintAssetRequest {
                 asset: MintAssetTarget::Registered,
-                recipient: Owner::Address(receiver),
+                recipient: Owner::Program(receiver),
                 amount: Unit::from_units(1),
             }),
         );

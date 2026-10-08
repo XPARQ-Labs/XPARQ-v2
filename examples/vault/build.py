@@ -5,7 +5,7 @@ import pathlib
 import struct
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--recipient-hex', required=True, help='32-byte account address payload, as hex')
+parser.add_argument('--recipient-hex', required=True, help='32-byte Program ID, as hex')
 parser.add_argument('--coin-units', type=int, default=0, help='native zeno per invocation')
 parser.add_argument('--asset-id', help='32-byte asset contract ID, as hex')
 parser.add_argument('--asset-units', type=int, default=0, help='asset base units per invocation')
@@ -27,7 +27,7 @@ if bool(args.asset_id) != bool(args.asset_units):
     parser.error('--asset-id and positive --asset-units must be supplied together')
 if not args.coin_units and not args.asset_units:
     parser.error('at least one positive payout is required')
-recipient = b'\x00' + hash_bytes(args.recipient_hex)  # Owner::Address
+recipient = b'\x00' + hash_bytes(args.recipient_hex)  # Owner::Program
 code = bytearray(b'XPVM' + struct.pack('<BHHI', 2, 1, 0, 0))
 if args.coin_units:
     code += b'\x06' + recipient + struct.pack('<Q', args.coin_units)

@@ -17,7 +17,7 @@ mod tests {
     #[test]
     fn transaction_submission_posts_canonical_bytes() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let program_id = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -39,7 +39,7 @@ mod tests {
                 .unwrap();
         });
         let response: SubmitTransactionResponse =
-            http_post_bytes(&address.to_string(), "/transaction", &[1, 2, 3, 4]).unwrap();
+            http_post_bytes(&program_id.to_string(), "/transaction", &[1, 2, 3, 4]).unwrap();
         assert_eq!(response.hash, "0".repeat(64));
         server.join().unwrap();
     }
