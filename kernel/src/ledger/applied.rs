@@ -43,7 +43,7 @@ mod vm_state_call_tests {
         let owner = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([0x91; crypto::HASH_SIZE]);
         let mut state = LedgerState::default();
-        let input = CoinShare::from_bytes([0x23; crypto::HASH16_SIZE]);
+        let input = CoinShare::from_bytes([0x23; crypto::HASH_SIZE]);
         let amount = Zeno::from_zeno(1_000_000);
         state
             .utxos
@@ -96,6 +96,7 @@ mod vm_state_call_tests {
                 call: call.clone(),
                 payment,
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: seed.public_key(),
                     signature: seed.sign(commitment.as_bytes()),
                 },
@@ -716,7 +717,7 @@ mod coin_atomicity_tests {
     fn coin_coin_failure_after_each_mutation_restores_state_and_retry_root() {
         let owner = program_id(1);
 
-        let input = CoinShare::from_bytes([3; crypto::HASH16_SIZE]);
+        let input = CoinShare::from_bytes([3; crypto::HASH_SIZE]);
 
         let mut original = LedgerState::default();
 
@@ -811,7 +812,7 @@ mod coin_atomicity_tests {
         let before = state.clone();
 
         let corrupt = CoinRollbackJournal {
-            created_coin_ids: vec![CoinShare::from_bytes([9; crypto::HASH16_SIZE])],
+            created_coin_ids: vec![CoinShare::from_bytes([9; crypto::HASH_SIZE])],
 
             mined: Zeno::from_zeno(10),
 

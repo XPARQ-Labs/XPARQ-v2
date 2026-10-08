@@ -23,7 +23,7 @@ mod payment_tests {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([19; 32]));
         let signer = program_id_from_public_key(&seed.public_key()).unwrap();
         let chain = ChainContext::new([7; 32]);
-        let input = CoinShare::from_bytes([2; crypto::HASH16_SIZE]);
+        let input = CoinShare::from_bytes([2; crypto::HASH_SIZE]);
         let call = ProgramCall {
             program: SystemProgramId::ASSET,
             opcode: AssetOpcode::Register as u8,
@@ -63,6 +63,7 @@ mod payment_tests {
                 call: call.clone(),
                 payment,
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: seed.public_key(),
                     signature: seed.sign(commitment.as_bytes()),
                 },
@@ -79,7 +80,7 @@ mod payment_tests {
             .apply(
                 &decoded,
                 ExecutionContext {
- actor: crate::common::Owner::Program(signer),
+                    actor: crate::common::Owner::Program(signer),
                     commitment: [1; 32],
                 },
             )
@@ -185,7 +186,7 @@ mod xpq_transfer_tests {
     ) -> (LedgerState, AuthorizedProgramInvocation, ChainContext) {
         let keys = SigningSeed::new(scheme, Box::new([91; 32]));
         let owner = program_id_from_public_key(&keys.public_key()).unwrap();
-        let input = CoinShare::from_bytes([92; crypto::HASH16_SIZE]);
+        let input = CoinShare::from_bytes([92; crypto::HASH_SIZE]);
         let amount = 1_000_000;
         let mut state = LedgerState::default();
         state.coin.total_mined = Zeno::from_zeno(amount);
@@ -232,6 +233,7 @@ mod xpq_transfer_tests {
                 call: call.clone(),
                 payment,
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: keys.public_key(),
                     signature: keys.sign(commitment.as_bytes()),
                 },
@@ -285,7 +287,12 @@ mod xpq_transfer_tests {
         changed.call.payload.push(0);
         assert!(changed.validate_structure().is_err());
         state
-            .apply_program_call(tx.clone(), ProgramId([95; crypto::PROGRAM_ID_SIZE]), chain, 1)
+            .apply_program_call(
+                tx.clone(),
+                ProgramId([95; crypto::PROGRAM_ID_SIZE]),
+                chain,
+                1,
+            )
             .unwrap();
         let after = state.clone();
         assert!(
@@ -297,17 +304,14 @@ mod xpq_transfer_tests {
     }
 
     #[test]
-    fn xpq_transfer_rejects_every_cross_scheme_authorization() {
+    fn xpq_transfer_rejects_foreign_keys_with_same_or_different_scheme() {
         for owner_scheme in crypto::AccountSignatureScheme::ALL {
             let (mut state, tx, chain) =
                 fixture_for_scheme(owner_scheme, ProgramId([94; crypto::PROGRAM_ID_SIZE]));
             validate_consensus_call(tx.clone(), chain, 1, &state).unwrap();
             let before = state.clone();
             for attacker_scheme in crypto::AccountSignatureScheme::ALL {
-                if attacker_scheme == owner_scheme {
-                    continue;
-                }
-                let keys = SigningSeed::new(attacker_scheme, Box::new([91; 32]));
+                let keys = SigningSeed::new(attacker_scheme, Box::new([90; 32]));
                 let attacker = program_id_from_public_key(&keys.public_key()).unwrap();
                 assert_ne!(attacker, tx.signer);
                 let mut forged = tx.clone();
@@ -319,6 +323,7 @@ mod xpq_transfer_tests {
                 )
                 .unwrap();
                 forged.authorization = AccountAuthorization {
+                    salt: [0; 32],
                     public_key: keys.public_key(),
                     signature: keys.sign(commitment.as_bytes()),
                 };
@@ -334,7 +339,12 @@ mod xpq_transfer_tests {
                 ));
                 assert!(
                     state
-                        .apply_program_call(forged, ProgramId([95; crypto::PROGRAM_ID_SIZE]), chain, 1,)
+                        .apply_program_call(
+                            forged,
+                            ProgramId([95; crypto::PROGRAM_ID_SIZE]),
+                            chain,
+                            1,
+                        )
                         .is_err()
                 );
                 assert_eq!(state, before);
@@ -351,6 +361,7 @@ mod xpq_transfer_tests {
                 )
                 .unwrap();
                 rewritten.authorization = AccountAuthorization {
+                    salt: [0; 32],
                     public_key: keys.public_key(),
                     signature: keys.sign(commitment.as_bytes()),
                 };
@@ -396,12 +407,14 @@ mod xpq_transfer_tests {
         let commitment =
             crate::program::AuthorizationCommitment::from_bytes([98; crypto::HASH_SIZE]);
         let authorization = AccountAuthorization {
+            salt: [0; 32],
             public_key: recipient_keys.public_key(),
             signature: recipient_keys.sign(commitment.as_bytes()),
         };
         assert!(authorization.verify_commitment(recipient, &commitment, 1));
         let old_keys = SigningSeed::new(Signature::MlDsa44, Box::new([91; 32]));
         let old_authorization = AccountAuthorization {
+            salt: [0; 32],
             public_key: old_keys.public_key(),
             signature: old_keys.sign(commitment.as_bytes()),
         };

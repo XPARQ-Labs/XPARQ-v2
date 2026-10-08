@@ -4,8 +4,8 @@ use kernel::{
     block::{Block, Emission, GENESIS_TARGET_BITS, Header, block_bytes, decode_block},
     common::{Height, Nonce},
     crypto::{
-        AccountSignatureScheme, ProgramId, HashDomain, SigningSeed, program_id_from_public_key,
-        canonical_bytes, domain,
+        AccountSignatureScheme, HashDomain, ProgramId, SigningSeed, canonical_bytes, domain,
+        program_id_from_public_key,
     },
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     operation::{AuthorizedDeployProgram, BlockOperation},
@@ -129,11 +129,12 @@ fn cloned_blocks_share_payload_until_mutation_without_changing_wire_bytes() {
         deploy,
         payment: CoinTransition::coin(
             owner,
-            vec![CoinShare::from_bytes([1; 16])],
+            vec![CoinShare::from_bytes([1; 32])],
             vec![CoinOutput::new(owner, Zeno::ONE)],
         )
         .unwrap(),
         authorization: AccountAuthorization {
+            salt: [0; 32],
             public_key: seed.public_key(),
             signature: seed.sign(&[0; 32]),
         },

@@ -17,7 +17,7 @@ const DATABASE_FILE: &str = "xparq.redb";
 
 // Reset-chain schema stores coin-only UTXOs and Program extension state/journals.
 // Tagged CoinOutput recipients require a fresh database; old bytes are incompatible.
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 16;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");
@@ -496,7 +496,7 @@ mod coin_origin_tests {
         let chain = ChainContext::new([7; kernel::crypto::HASH_SIZE]);
         let mut spend = CoinTransition::coin(
             signer,
-            vec![CoinShare::from_bytes([1; kernel::crypto::HASH16_SIZE])],
+            vec![CoinShare::from_bytes([1; kernel::crypto::HASH_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(10))],
         )
         .unwrap();
@@ -508,6 +508,7 @@ mod coin_origin_tests {
             call,
             payment: spend.clone(),
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },
@@ -556,7 +557,7 @@ mod coin_origin_tests {
         let chain = ChainContext::new([8; kernel::crypto::HASH_SIZE]);
         let mut payment = CoinTransition::coin(
             owner,
-            vec![CoinShare::from_bytes([2; kernel::crypto::HASH16_SIZE])],
+            vec![CoinShare::from_bytes([2; kernel::crypto::HASH_SIZE])],
             vec![CoinOutput::new(owner, Zeno::from_zeno(10))],
         )
         .unwrap();
@@ -574,6 +575,7 @@ mod coin_origin_tests {
             },
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(&[0; kernel::crypto::HASH_SIZE]),
             },
@@ -1451,6 +1453,30 @@ pub fn read_mempool(directory: &Path) -> Result<Vec<Vec<u8>>, String> {
                 .map_err(|error| format!("read mempool transaction: {error}"))
         })
         .collect()
+}
+
+/// Commit borrowed canonical mempool buffers without copying their payloads.
+pub fn replace_mempool_slices(directory: &Path, values: &[&[u8]]) -> Result<(), String> {
+    let database = open(directory)?;
+    let transaction = database
+        .begin_write()
+        .map_err(|error| format!("begin mempool write: {error}"))?;
+    {
+        let mut table = transaction
+            .open_table(MEMPOOL)
+            .map_err(|error| format!("open mempool table: {error}"))?;
+        table
+            .retain(|_, _| false)
+            .map_err(|error| format!("clear mempool: {error}"))?;
+        for (index, bytes) in values.iter().enumerate() {
+            table
+                .insert(index as u64, *bytes)
+                .map_err(|error| format!("insert mempool value: {error}"))?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("commit mempool: {error}"))
 }
 
 pub fn replace_mempool(directory: &Path, transactions: &[Vec<u8>]) -> Result<(), String> {

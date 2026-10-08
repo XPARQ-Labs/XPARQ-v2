@@ -2,7 +2,10 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crypto::{BlockHash, HashDomain, StateRoot, canonical_bytes, domain};
+use crypto::{BlockHash, HashDomain, StateRoot, canonical_length, domain_serialized};
+
+#[cfg(test)]
+use crypto::canonical_bytes;
 
 use crate::{
     blockchain::{Block, Chain, ChainError},
@@ -188,9 +191,7 @@ impl Ledger {
             )),
         };
 
-        ledger.state.validate_supply_invariants()?;
-
-        ledger.state.audit_coin_supply()?;
+        ledger.state.audit_supply_invariants()?;
         ledger
             .state
             .programs
@@ -657,17 +658,35 @@ impl LedgerState {
     /// Cross-check accounting records against independently stored live UTXOs.
 
     pub fn validate_supply_invariants(&self) -> Result<(), LedgerError> {
-        let coin_total = self.utxos.total_value();
+        self.validate_supply_with_asset_cache(true)
+    }
 
+    /// Deep audit for restore/recovery, including an uncached asset scan.
+    pub fn audit_supply_invariants(&self) -> Result<(), LedgerError> {
+        self.validate_supply_with_asset_cache(false)?;
+        self.audit_coin_supply()
+    }
+
+    fn validate_supply_with_asset_cache(&self, allow_cached: bool) -> Result<(), LedgerError> {
+        let coin_total = self.utxos.total_value();
         if self.coin.supply() != Some(coin_total) || self.utxos.is_empty() != coin_total.is_zero() {
             return Err(LedgerError::CoinSupplyMismatch);
         }
+        if allow_cached {
+            if let Some(result) = self.extensions.assets.validate_incremental_supply() {
+                return result;
+            }
+        }
+        self.audit_asset_supply()
+    }
 
+    /// Scan all asset records and shares independently of previous successful audits.
+    pub fn audit_asset_supply(&self) -> Result<(), LedgerError> {
         let assets = &self.extensions.assets;
 
         let mut totals = BTreeMap::new();
 
-        for share in assets.shares.values() {
+        for share in assets.shares().values() {
             if share.amount.is_zero() {
                 return Err(LedgerError::InvalidAssetState);
             }
@@ -684,7 +703,7 @@ impl LedgerState {
                 .ok_or(LedgerError::SupplyOverflow)?;
         }
 
-        for (asset, record) in &assets.records {
+        for (asset, record) in assets.records.iter() {
             record
                 .metadata
                 .validate()
@@ -701,6 +720,7 @@ impl LedgerState {
             }
         }
 
+        assets.remember_valid_supply(totals);
         Ok(())
     }
 
@@ -728,7 +748,40 @@ impl LedgerState {
         Ok(())
     }
 
+    pub(crate) fn canonical_encoded_len(&self) -> Result<u64, crypto::CodecError> {
+        let Self {
+            utxos,
+            coin,
+            programs,
+            extensions,
+            root_cache: _,
+        } = self;
+        let lengths = [
+            utxos.canonical_encoded_len()?,
+            canonical_length(coin)?,
+            canonical_length(programs)?,
+            extensions.canonical_encoded_len()?,
+        ];
+        lengths.into_iter().try_fold(0u64, |sum, len| {
+            sum.checked_add(len).ok_or(crypto::CodecError::EncodeFailed)
+        })
+    }
+
+    pub(crate) fn hash_canonical_state(&self) -> Result<StateRoot, LedgerError> {
+        Ok(StateRoot(
+            domain_serialized(
+                HashDomain::ProtocolState,
+                self.canonical_encoded_len()?,
+                &(&self.utxos, &self.coin, &self.programs, &self.extensions),
+            )?
+            .into_bytes(),
+        ))
+    }
+
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
+        if let Some(root) = self.cached_state_root() {
+            return Ok(root);
+        }
         if self.extensions == crate::program::system::script::state::ExtensionState::default()
             && self.utxos.is_empty()
             && self.programs.is_empty()
@@ -738,11 +791,9 @@ impl LedgerState {
             return Ok(StateRoot::ZERO);
         }
 
-        let state = canonical_bytes(&(&self.utxos, &self.coin, &self.programs, &self.extensions))?;
-
-        Ok(StateRoot(
-            domain(HashDomain::ProtocolState, &state).into_bytes(),
-        ))
+        let root = self.hash_canonical_state()?;
+        self.cache_state_root(root);
+        Ok(root)
     }
 }
 
@@ -981,6 +1032,7 @@ mod p3e_block_atomicity_tests {
             deploy: deploy.clone(),
             payment: draft_payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(b"deploy-size-fixture"),
             },
@@ -1050,7 +1102,7 @@ mod p3e_block_atomicity_tests {
         state
             .utxos
             .insert_coin(
-                CoinShare::from_bytes([0x44; crypto::HASH16_SIZE]),
+                CoinShare::from_bytes([0x44; crypto::HASH_SIZE]),
                 CoinUtxo {
                     amount: Zeno::from_zeno(109),
 
@@ -1730,6 +1782,7 @@ mod p3e_block_atomicity_tests {
                 payment,
 
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: seed.public_key(),
 
                     signature: seed.sign(commitment.as_bytes()),
@@ -1862,7 +1915,7 @@ mod p3e_block_atomicity_tests {
             .as_mut()
             .unwrap()
             .created_coin_ids
-            .push(CoinShare::from_bytes([0xfa; crypto::HASH16_SIZE]));
+            .push(CoinShare::from_bytes([0xfa; crypto::HASH_SIZE]));
 
         let before = ledger_bytes(&corrupt);
 
@@ -1990,6 +2043,7 @@ mod p3e_block_atomicity_tests {
                     payment,
 
                     authorization: AccountAuthorization {
+                        salt: [0; 32],
                         public_key: seed.public_key(),
 
                         signature: seed.sign(commitment.as_bytes()),
@@ -2109,7 +2163,7 @@ mod p3e_block_atomicity_tests {
             .state
             .extensions
             .assets
-            .shares
+            .shares()
             .keys()
             .copied()
             .collect();
@@ -2135,7 +2189,7 @@ mod p3e_block_atomicity_tests {
             .state
             .extensions
             .assets
-            .shares
+            .shares()
             .keys()
             .copied()
             .collect();

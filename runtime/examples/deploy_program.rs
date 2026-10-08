@@ -7,7 +7,7 @@ use std::{
 };
 
 use kernel::{
-    crypto::{AccountSignatureScheme, SigningSeed, program_id_from_public_key, canonical_bytes},
+    crypto::{AccountSignatureScheme, SigningSeed, canonical_bytes, program_id_from_public_key},
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     operation::{AuthorizedDeployProgram, BlockOperation},
     program::{AccountAuthorization, CoinCharges, CoinTransition, DeployProgram},
@@ -49,7 +49,8 @@ fn run() -> Result<(), String> {
         .try_into()
         .map_err(|_| "seed must contain exactly 32 bytes")?;
     let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new(seed_bytes));
-    let owner = program_id_from_public_key(&seed.public_key()).map_err(|error| error.to_string())?;
+    let owner =
+        program_id_from_public_key(&seed.public_key()).map_err(|error| error.to_string())?;
     let input: CoinShare = args[3]
         .parse()
         .map_err(|e| format!("invalid coin share: {e}"))?;
@@ -92,6 +93,7 @@ fn run() -> Result<(), String> {
             deploy: program.clone(),
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: placeholder.clone(),
             },

@@ -7,6 +7,7 @@ pub mod ledger;
 pub mod monetary;
 pub mod operation;
 pub mod program;
+pub mod state_map;
 
 pub mod block {
     pub use crate::blockchain::*;

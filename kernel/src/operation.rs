@@ -43,6 +43,23 @@ pub enum BlockOperation {
     ProgramCall(Box<AuthorizedProgramInvocation>),
 }
 
+/// Borrowed wire view: variant order and payload encoding match BlockOperation.
+/// Used to measure canonical size without cloning transaction payloads.
+#[derive(BorshSerialize)]
+pub enum BlockOperationRef<'a> {
+    DeployProgram(&'a AuthorizedDeployProgram),
+    ProgramCall(&'a AuthorizedProgramInvocation),
+}
+
+impl<'a> From<&'a BlockOperation> for BlockOperationRef<'a> {
+    fn from(operation: &'a BlockOperation) -> Self {
+        match operation {
+            BlockOperation::DeployProgram(deploy) => Self::DeployProgram(deploy),
+            BlockOperation::ProgramCall(call) => Self::ProgramCall(call),
+        }
+    }
+}
+
 impl BlockOperation {
     pub fn id(&self) -> Result<Hash, CodecError> {
         let bytes = canonical_bytes(self).map_err(|_| CodecError::EncodeFailed)?;
@@ -100,15 +117,109 @@ mod tests {
             },
             payment: CoinTransition::coin(
                 owner,
-                vec![CoinShare::from_bytes([0x11; crypto::HASH16_SIZE])],
+                vec![CoinShare::from_bytes([0x11; crypto::HASH_SIZE])],
                 vec![CoinOutput::new(owner, Zeno::ONE)],
             )
             .unwrap(),
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key,
                 signature: seed.sign(b"xparq-operation-test"),
             },
         }))
+    }
+
+    fn size_fixtures(bytes: usize, inputs: usize) -> [BlockOperation; 2] {
+        let deploy = deploy_operation(vec![7; bytes]);
+        let BlockOperation::DeployProgram(ref signed) = deploy else {
+            unreachable!()
+        };
+        let input_ids = (0..inputs)
+            .map(|index| {
+                let mut id = [0; crypto::HASH_SIZE];
+                id[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                CoinShare::from_bytes(id)
+            })
+            .collect();
+        let call = BlockOperation::ProgramCall(Box::new(AuthorizedProgramInvocation {
+            signer: signed.deploy.owner,
+            call: crate::program::system::script::call::ProgramCall {
+                program: crate::program::system::script::call::SystemProgramId::VM,
+                opcode: 0,
+                payload: vec![5; bytes],
+            },
+            payment: CoinTransition::coin(
+                signed.deploy.owner,
+                input_ids,
+                vec![CoinOutput::new(signed.deploy.owner, Zeno::ONE)],
+            )
+            .unwrap(),
+            authorization: signed.authorization.clone(),
+        }));
+        [deploy, call]
+    }
+
+    #[test]
+    fn borrowed_operation_encoding_and_size_match_owned_wire_format() {
+        for (bytes, inputs) in [(0, 1), (32, 79), (65536, 256), (2 * 1024 * 1024, 1)] {
+            for (tag, operation) in size_fixtures(bytes, inputs).iter().enumerate() {
+                let owned = canonical_bytes(operation).unwrap();
+                let borrowed = BlockOperationRef::from(operation);
+                assert_eq!(owned[0], tag as u8);
+                assert_eq!(canonical_bytes(&borrowed).unwrap(), owned);
+                assert_eq!(
+                    crypto::canonical_length(&borrowed).unwrap(),
+                    owned.len() as u64
+                );
+                assert_eq!(
+                    crypto::canonical_length(operation).unwrap(),
+                    owned.len() as u64
+                );
+                assert_eq!(
+                    owned.len() > crate::blockchain::MAX_OPERATION_SIZE,
+                    crypto::canonical_length(&borrowed).unwrap()
+                        > crate::blockchain::MAX_OPERATION_SIZE as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual transaction size benchmark; use release mode and --nocapture"]
+    fn benchmark_borrowed_operation_size() {
+        use std::{hint::black_box, time::Instant};
+        for (name, operation) in ["deploy", "call"]
+            .into_iter()
+            .zip(size_fixtures(65536, 256))
+        {
+            let expected = canonical_bytes(&operation).unwrap().len() as u64;
+            let rounds = 1000;
+            let start = Instant::now();
+            for _ in 0..rounds {
+                let cloned = black_box(&operation).clone();
+                assert_eq!(
+                    black_box(canonical_bytes(&cloned).unwrap().len() as u64),
+                    expected
+                );
+            }
+            let old = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..rounds {
+                assert_eq!(
+                    black_box(
+                        crypto::canonical_length(&BlockOperationRef::from(black_box(&operation)))
+                            .unwrap()
+                    ),
+                    expected
+                );
+            }
+            let new = start.elapsed();
+            println!(
+                "kind={name} bytes={expected} rounds={rounds} clone_vec_ms={:.3} borrowed_count_ms={:.3}",
+                old.as_secs_f64() * 1000.0,
+                new.as_secs_f64() * 1000.0
+            );
+        }
     }
 
     #[test]

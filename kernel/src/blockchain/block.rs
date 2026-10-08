@@ -7,7 +7,7 @@ use std::{
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::{
-    ProgramId, BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, StateRoot, canonical_bytes,
+    BlockHash, Hash, HashDomain, MerkleHash, PreviousHash, ProgramId, StateRoot, canonical_bytes,
     domain,
 };
 
@@ -286,7 +286,8 @@ impl Block {
         }
 
         if self.body.operations.iter().any(|operation| {
-            canonical_bytes(operation).map_or(true, |bytes| bytes.len() > MAX_OPERATION_SIZE)
+            crypto::canonical_length(operation)
+                .map_or(true, |size| size > MAX_OPERATION_SIZE as u64)
         }) {
             return Err(BlockError::InvalidOperation);
         }
@@ -517,7 +518,7 @@ mod p3e_replay_tests {
 
         let intent = CoinTransition::coin(
             signer,
-            vec![CoinShare::from_bytes([0x31; crypto::HASH16_SIZE])],
+            vec![CoinShare::from_bytes([0x31; crypto::HASH_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
         )
         .expect("valid structural spend fixture");
@@ -531,6 +532,7 @@ mod p3e_replay_tests {
             call,
             payment: intent,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },

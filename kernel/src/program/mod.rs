@@ -89,7 +89,7 @@ mod phase3_bounds_tests {
     fn in_memory_oversized_transition_is_rejected() {
         let intent = CoinTransition {
             signer: ProgramId::ZERO,
-            inputs: vec![CoinShare::from_bytes([1; crypto::HASH16_SIZE]); MAX_PROGRAM_ITEMS + 1],
+            inputs: vec![CoinShare::from_bytes([1; crypto::HASH_SIZE]); MAX_PROGRAM_ITEMS + 1],
             outputs: vec![],
             charges: CoinCharges::default(),
         };

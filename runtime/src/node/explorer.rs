@@ -52,14 +52,11 @@ pub(super) fn account_response(
 
     let mut total = Zeno::from_zeno(0);
 
-    let mut account_utxos = ledger
+    let account_utxos = ledger
         .state()
         .utxos
-        .coins()
-        .filter(|(_, coin)| coin.owner == Owner::Program(program_id))
+        .coins_by_owner(Owner::Program(program_id))
         .collect::<Vec<_>>();
-
-    account_utxos.sort_by_key(|(id, _)| *id);
 
     for (_, coin) in &account_utxos {
         total = total
@@ -112,8 +109,14 @@ pub(super) fn account_response(
     );
 
     let record = ledger.state().programs.program(&program_id);
-    let asset_shares: Vec<_> = ledger.state().extensions.assets.shares().iter()
-        .filter(|(_, value)| value.owner == Owner::Program(program_id))
+    let mut owned_asset_shares: Vec<_> = ledger
+        .state()
+        .extensions
+        .assets
+        .shares_by_owner(Owner::Program(program_id))
+        .collect();
+    owned_asset_shares.sort_by_key(|(share, _)| *share);
+    let asset_shares: Vec<_> = owned_asset_shares.into_iter()
         .map(|(share, value)| serde_json::json!({"id":share.to_string(),"asset":value.asset.to_string(),"amount":value.amount.to_string()}))
         .collect();
     Ok(serde_json::json!({
@@ -162,8 +165,7 @@ pub(super) fn balance_response(
     for utxo in ledger
         .state()
         .utxos
-        .coins()
-        .filter(|(_, coin)| coin.owner == Owner::Program(program_id))
+        .coins_by_owner(Owner::Program(program_id))
     {
         total = total
             .checked_add(utxo.1.amount)
@@ -227,8 +229,7 @@ pub(super) fn explorer_program_response(
     for utxo in ledger
         .state()
         .utxos
-        .coins()
-        .filter(|(_, coin)| coin.owner == Owner::Program(program_id))
+        .coins_by_owner(Owner::Program(program_id))
     {
         total = total
             .checked_add(utxo.1.amount)
@@ -308,7 +309,8 @@ pub(super) fn explorer_program_response(
                     .nth(transaction_index)
                     .ok_or("indexed activity transaction is missing from its block")?;
 
-                if let Some(activity) = program_transaction_activity(&transaction, program_id, &block)?
+                if let Some(activity) =
+                    program_transaction_activity(&transaction, program_id, &block)?
                 {
                     activities.push(activity);
                 }
@@ -541,11 +543,7 @@ pub(super) fn checked_output_sum(amounts: impl IntoIterator<Item = Zeno>) -> Res
 
 pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
-        AuthorizedProgramEnvelope::Program(tx)
-            if is_coin_transfer(&tx.call) =>
-        {
-            "transfer"
-        }
+        AuthorizedProgramEnvelope::Program(tx) if is_coin_transfer(&tx.call) => "transfer",
 
         AuthorizedProgramEnvelope::Program(_) => "program",
     }
@@ -795,9 +793,7 @@ fn program_shares(
 
     program_id: ProgramId,
 ) -> Vec<serde_json::Value> {
-    ledger.state().extensions.assets.shares().iter()
-
-        .filter(|(_, s)| s.asset == asset && s.owner == Owner::Program(program_id))
+    ledger.state().extensions.assets.shares_by_owner_asset(Owner::Program(program_id), asset)
 
         .map(|(id, s)| serde_json::json!({"share_id": id.to_string(), "amount": s.amount.to_string(), "owner": asset_owner_response(s.owner)})).collect()
 }
@@ -864,12 +860,11 @@ pub(super) fn program_asset_response(
             .state()
             .extensions
             .assets
-            .shares()
-            .values()
-            .filter(|s| s.asset == asset && s.owner == Owner::Program(program_id))
-            .try_fold(extension::asset_program::asset::Unit::ZERO, |sum, s| {
-                sum.checked_add(s.amount).ok_or("program balance overflow")
-            })?;
+            .shares_by_owner_asset(Owner::Program(program_id), asset)
+            .try_fold(
+                extension::asset_program::asset::Unit::ZERO,
+                |sum, (_, s)| sum.checked_add(s.amount).ok_or("program balance overflow"),
+            )?;
 
         return Ok(
             serde_json::json!({"monetary_program":0,"asset":asset.to_string(),"program_id":kernel::crypto::program_id_to_string(&program_id),"balance":total.to_string(),"shares":shares}),
@@ -1087,6 +1082,8 @@ pub(super) fn program_state_response(
 }
 
 fn is_coin_transfer(call: &kernel::program::system::script::call::ProgramCall) -> bool {
-    matches!(kernel::program::system::script::execute::decode_program(call),
-        Ok(kernel::program::system::script::execute::DecodedProgramCall::XpqTransfer))
+    matches!(
+        kernel::program::system::script::execute::decode_program(call),
+        Ok(kernel::program::system::script::execute::DecodedProgramCall::XpqTransfer)
+    )
 }

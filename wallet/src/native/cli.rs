@@ -17,6 +17,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         println!("10. Program Assets");
         println!("11. Deploy Program");
         println!("12. Exit");
+        println!("13. Manage Accounts");
 
         match prompt("Select")?.as_str() {
             "1" => {
@@ -55,6 +56,28 @@ pub(super) fn interactive_menu() -> Result<(), String> {
                 args.extend(["--code".into(), prompt("XPVM bytecode file")?]);
                 args.extend(["--nonce".into(), prompt("Deploy nonce")?]);
                 super::deploy::deploy_program(&args)?;
+            }
+            "13" => {
+                let path = prompt_default("Wallet file", DEFAULT_WALLET_PATH)?;
+                manage_accounts("accounts", &["--wallet".into(), path.clone()])?;
+                match prompt("Account action (add/use/back)")?.as_str() {
+                    "add" => {
+                        manage_accounts("account-add", &["--wallet".into(), path])?;
+                    }
+                    "use" => {
+                        manage_accounts(
+                            "account-use",
+                            &[
+                                "--wallet".into(),
+                                path,
+                                "--salt".into(),
+                                prompt("Account salt")?,
+                            ],
+                        )?;
+                    }
+                    "back" => {}
+                    choice => return Err(format!("unknown account action `{choice}`")),
+                }
             }
             "12" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
@@ -253,6 +276,9 @@ pub(super) fn create_wallet(args: &[String]) -> Result<(), String> {
     let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
     let mut wallet = account_wallet_from_bip39_mnemonic(&mnemonic, account)?;
     wallet.mnemonic = Some(mnemonic.to_string());
+    if let Some(value) = option(args, "--salt") {
+        wallet.select_account(wallet::account_salt_from_string(value)?)?;
+    }
     let program_id = wallet.program_id;
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
@@ -271,6 +297,9 @@ pub(super) fn restore_wallet(args: &[String]) -> Result<(), String> {
     let account = signature_account_option(args)?.unwrap_or(Signature::MlDsa44);
     let mut wallet = account_wallet_from_bip39_mnemonic(phrase, account)?;
     wallet.mnemonic = Some(phrase.to_string());
+    if let Some(value) = option(args, "--salt") {
+        wallet.select_account(wallet::account_salt_from_string(value)?)?;
+    }
     let program_id = wallet.program_id;
     write_account_wallet(path, &wallet)?;
     println!("signature_account: {account}");
@@ -290,6 +319,46 @@ fn signature_account_option(args: &[String]) -> Result<Option<Signature>, String
                 .map_err(|_| "invalid --account; use mldsa44, mldsa65, or mldsa87".to_string())
         })
         .transpose()
+}
+
+pub(super) fn manage_accounts(command: &str, args: &[String]) -> Result<(), String> {
+    let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
+    let original = Zeroizing::new(fs::read(path).map_err(|error| format!("read wallet: {error}"))?);
+    let mut loaded = LoadedWallet(account_wallet_from_file_bytes(&original)?);
+    if command == "accounts" {
+        for salt in &loaded.0.account_salts {
+            let id =
+                kernel::crypto::program_id_from_public_key_with_salt(&loaded.0.public_key, salt)
+                    .map_err(|error| error.to_string())?;
+            println!(
+                "{} Program ID: {id} Salt: {}",
+                if *salt == loaded.0.account_salt {
+                    "*"
+                } else {
+                    " "
+                },
+                hex::encode(salt)
+            );
+        }
+        return Ok(());
+    }
+    let salt = if let Some(value) = option(args, "--salt") {
+        wallet::account_salt_from_string(value)?
+    } else if command == "account-add" {
+        let mut salt = [0; 32];
+        getrandom::fill(&mut salt).map_err(|error| format!("generate account salt: {error}"))?;
+        salt
+    } else {
+        return Err("account-use requires --salt HEX64".into());
+    };
+    if command == "account-use" && !loaded.0.account_salts.contains(&salt) {
+        return Err("account salt is not in this wallet; use account-add first".into());
+    }
+    let id = loaded.0.select_account(salt)?;
+    super::wallet_file::update_account_wallet(path, &loaded.0, &original)?;
+    println!("Program ID: {id}");
+    println!("Salt: {}", hex::encode(salt));
+    Ok(())
 }
 
 pub(super) fn print_program_id(args: &[String]) -> Result<(), String> {
@@ -438,5 +507,94 @@ fn print_human_json_value(label: Option<&str>, value: &serde_json::Value, indent
                 print_human_json_value(Some(key), value, child_indent);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod account_cli_tests {
+    use super::*;
+    #[test]
+    fn account_commands_persist_selection_and_recover_salted_identity() {
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("xparq-account-cli-{}-{tick}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("wallet.json");
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let mut wallet = account_wallet_from_bip39_mnemonic(phrase, Signature::MlDsa44).unwrap();
+        wallet.mnemonic = Some(phrase.into());
+        let zero = wallet.program_id;
+        write_account_wallet(path.to_str().unwrap(), &wallet).unwrap();
+        drop(wallet);
+        let base = vec!["--wallet".into(), path.to_str().unwrap().into()];
+        let mut selected = base.clone();
+        selected.extend(["--salt".into(), hex::encode([7; 32])]);
+        manage_accounts("account-add", &selected).unwrap();
+        let active = load_wallet(path.to_str().unwrap()).unwrap().0.program_id;
+        assert_ne!(active, zero);
+        assert_eq!(
+            wallet_program_id_from_file_bytes(&fs::read(&path).unwrap()).unwrap(),
+            active
+        );
+        manage_accounts("accounts", &base).unwrap();
+        let mut reset = base.clone();
+        reset.extend(["--salt".into(), hex::encode([0; 32])]);
+        manage_accounts("account-use", &reset).unwrap();
+        assert_eq!(
+            load_wallet(path.to_str().unwrap()).unwrap().0.program_id,
+            zero
+        );
+        let recovered = directory.join("restored.json");
+        restore_wallet(&[
+            "--wallet".into(),
+            recovered.to_str().unwrap().into(),
+            "--mnemonic".into(),
+            phrase.into(),
+            "--salt".into(),
+            hex::encode([7; 32]),
+        ])
+        .unwrap();
+        assert_eq!(
+            load_wallet(recovered.to_str().unwrap())
+                .unwrap()
+                .0
+                .program_id,
+            active
+        );
+        let mut unknown = base.clone();
+        unknown.extend(["--salt".into(), hex::encode([8; 32])]);
+        assert!(manage_accounts("account-use", &unknown).is_err());
+        assert_eq!(
+            load_wallet(path.to_str().unwrap()).unwrap().0.program_id,
+            zero
+        );
+        let before = Zeroizing::new(fs::read(&path).unwrap());
+        let mut candidate = account_wallet_from_file_bytes(&before).unwrap();
+        candidate.select_account([9; 32]).unwrap();
+        manage_accounts("account-use", &selected).unwrap();
+        assert!(
+            super::super::wallet_file::update_account_wallet(
+                path.to_str().unwrap(),
+                &candidate,
+                &before
+            )
+            .is_err()
+        );
+        assert_eq!(
+            load_wallet(path.to_str().unwrap()).unwrap().0.program_id,
+            active
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 }

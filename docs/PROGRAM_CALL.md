@@ -100,7 +100,7 @@ recipients even when they receive no XPQ. See [OpenAPI](openapi.json) for routes
 
 ## Storage and compatibility
 
-Current chain spec version is **1**, storage schema **10**, and newly written
+Current chain spec version is **8**, storage schema **16**, and newly written
 snapshot version **3**. The snapshot loader supports the legacy v1 representation
 only when its decoder and chain/schema checks accept it; v2 is not accepted by
 this loader. Snapshots must match chain identity, checksum, canonical log and
@@ -108,28 +108,26 @@ state invariants. If no snapshot qualifies, startup replays from genesis.
 
 The reset baseline requires fresh compatible chain storage. Schema-mismatched
 databases are rejected, not automatically migrated; legacy asset balances are
-not imported. Returning the chain-spec version to 1 does not restore an earlier
-protocol, since the chain-spec hash commits to the actual rules and formats.
+not imported. The chain-spec hash commits to the actual rules and formats; a
+version number alone cannot make incompatible state readable.
 
 ## Verification status and remaining gates
 
-Recent focused checks passed workspace compilation, formatting and Clippy
-(with existing warnings), kernel/application boundary tests, snapshot tests and
-Program submission/mining/restart coverage. This is not a claim that the entire
-workspace test suite passes.
+On 8 October 2026, after the salted-account and 32-byte share changes, the full
+workspace test suite passed. Coverage includes authorization, monetary effects,
+VM, supply and state roots, snapshot/restart, mempool persistence, and network
+sync/reorg. The three-node program lifecycle passed as part of the network suite
+(8 tests, 121.53 s). The `litep2p-devnet` all-target build check also passed.
+Rust formatting, Markdown local links and OpenAPI JSON are checked separately.
+Existing vendor warnings remain; these checks do not replace a security audit.
 
-Three existing chain-spec fixture tests still expect older identity bytes:
+The chain-spec identity fixtures and Phase 4 vectors are reconciled for version 8:
 `bounded_work_rules_have_frozen_mainnet_chain_spec_identity`,
 `frozen_phase4_vectors_match_execution`, and
-`mainnet_genesis_and_chain_spec_match_the_current_structure`.
-They require deliberate fixture/identity reconciliation. On 3 October 2026, the
-three-node Program lifecycle passed gossip, mining, restart, stronger-fork reorg,
-orphan-index removal and post-reorg chain checks (426.66 s). Both explicitly
-enabled wallet CLI lifecycle tests passed: XPQ spend/consolidation and asset
-register/mint/transfer/consolidation/burn, recipient history and restart. The asset
-test consolidates before burning, so an exact change-share burn cannot remove
-the second share needed for consolidation. Formatting also passed. See
-[roadmap](../ROADMAP.md) and [security gates](SECURITY_ROADMAP.md).
+`mainnet_genesis_and_chain_spec_match_the_current_structure` pass.
+The explicitly enabled wallet CLI lifecycle tests last passed on 3 October 2026;
+they were not rerun as part of the default workspace suite on 8 October.
+See [roadmap](../ROADMAP.md) and [security gates](SECURITY_ROADMAP.md).
 
 ```bash
 cargo fmt --all -- --check
@@ -152,5 +150,26 @@ have one display/CLI/RPC format: exactly 64 hexadecimal characters. Public RPC
 owner objects have type `program` and a hex value. Legacy wallet-identity endpoints
 are removed; balance/history queries operate on ProgramId.
 
-Chain-spec version 6 and database schema 14 require an updated node and a new
+Chain-spec version 8 and database schema 16 require an updated node and a new
 compatible database. No existing-chain migration is provided.
+
+
+## Salted signature accounts (chain-spec 7)
+
+Every `AccountAuthorization` encodes `salt: [u8;32]`, then the existing public-key
+and signature fields. This is a fixed 32-byte array, not a length-prefixed Vec.
+The signature-policy v2 derives the signer from scheme, key and salt. The call,
+signer, payment and chain are already bound by the signed commitment, so changing
+salt or relabeling a signer cannot replay an authorization across accounts. The
+same proof layout applies to deploy authorization. Quote/submission APIs consume
+this updated canonical binary format. Salted authorization preserves the Owner
+layout; the subsequent chain-spec 8 change expands share IDs to 32 bytes. Node quoting and wallet sizing include the additional 32 proof bytes.
+
+## Full-width share identifiers (chain-spec 8)
+
+CoinShare and asset Share use full domain-separated SHA3-256 outputs: 32 bytes
+in canonical encoding and 64 hexadecimal characters in CLI/RPC/explorer output.
+The old 16-byte ID encoding is rejected. Canonical coin UTXO state weight is
+73 bytes (32-byte ID, 8-byte amount, 1-byte Owner tag and 32-byte ProgramId).
+State-growth burn automatically uses this weight; archival burn measures the
+updated transaction bytes. Database schema 16 rejects incompatible old storage.

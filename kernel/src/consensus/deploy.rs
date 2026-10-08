@@ -1,5 +1,9 @@
 use crate::monetary::coin::Zeno;
+#[cfg(test)]
+use crate::operation::BlockOperation;
+#[cfg(test)]
 use crypto::canonical_bytes;
+use crypto::canonical_length;
 
 use crate::{
     common::{ChainContext, Height},
@@ -8,7 +12,7 @@ use crate::{
         validate_exact_burn,
     },
     ledger::LedgerState,
-    operation::{AuthorizedDeployProgram, BlockOperation},
+    operation::{AuthorizedDeployProgram, BlockOperationRef},
     program::{AuthorizationCommitment, DeployError, ProgramId, prepare_deployment},
 };
 
@@ -93,10 +97,9 @@ pub fn quote_deploy_burn(
     if signed.deploy.owner != signed.payment.signer {
         return Err(DeployConsensusError::Deploy(DeployError::InvalidPayment));
     }
-    let size = canonical_bytes(&BlockOperation::DeployProgram(Box::new(signed.clone())))
-        .map_err(|_| DeployConsensusError::Deploy(DeployError::Encoding))?
-        .len();
-    if size > crate::blockchain::MAX_OPERATION_SIZE {
+    let size = canonical_length(&BlockOperationRef::DeployProgram(signed))
+        .map_err(|_| DeployConsensusError::Deploy(DeployError::Encoding))?;
+    if size > crate::blockchain::MAX_OPERATION_SIZE as u64 {
         return Err(DeployConsensusError::Deploy(DeployError::ProgramTooLarge));
     }
     let (program_id, record) =
@@ -108,12 +111,8 @@ pub fn quote_deploy_burn(
         .map_err(DeployConsensusError::Deploy)?;
     // Borsh maps use a fixed u32 count prefix, so insertion grows the encoding
     // by exactly one key/value pair, independently of registry cardinality.
-    let growth = u64::try_from(
-        canonical_bytes(&(program_id, record))
-            .map_err(|_| DeployConsensusError::Deploy(DeployError::Encoding))?
-            .len(),
-    )
-    .map_err(|_| DeployConsensusError::Deploy(DeployError::Encoding))?;
+    let growth = canonical_length(&(program_id, &record))
+        .map_err(|_| DeployConsensusError::Deploy(DeployError::Encoding))?;
     let (inputs, outputs) = signed
         .payment
         .coin_parts()
@@ -127,7 +126,7 @@ pub fn quote_deploy_burn(
         consumed_coin_utxos: inputs.len() as u64,
         created_state_weight: growth,
     };
-    let required_burn = ProtocolBurn::for_program_call(transition, size as u64)
+    let required_burn = ProtocolBurn::for_program_call(transition, size)
         .and_then(ProtocolBurn::total)
         .map_err(ProgramConsensusError::Burn)
         .map_err(DeployConsensusError::Program)?;
@@ -161,11 +160,12 @@ mod tests {
                 },
                 payment: CoinTransition::coin(
                     owner,
-                    vec![CoinShare::from_bytes([0x11; crypto::HASH16_SIZE])],
+                    vec![CoinShare::from_bytes([0x11; crypto::HASH_SIZE])],
                     vec![CoinOutput::new(owner, Zeno::ONE)],
                 )
                 .unwrap(),
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: public_key.clone(),
                     signature: seed.sign(b"quote-fixture"),
                 },

@@ -6,37 +6,8 @@ use static_assertions::const_assert_eq;
 use std::{error::Error, fmt, str::FromStr};
 
 pub const HASH_SIZE: usize = 32;
-pub const HASH16_SIZE: usize = 16;
 pub const POW_HASH_SIZE: usize = HASH_SIZE;
 const_assert_eq!(HASH_SIZE, 32);
-const_assert_eq!(HASH16_SIZE, 16);
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
-)]
-pub struct Hash16([u8; HASH16_SIZE]);
-
-impl Hash16 {
-    pub const ZERO: Self = Self([0; HASH16_SIZE]);
-
-    pub const fn from_bytes(bytes: [u8; HASH16_SIZE]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; HASH16_SIZE] {
-        &self.0
-    }
-
-    pub const fn into_bytes(self) -> [u8; HASH16_SIZE] {
-        self.0
-    }
-
-    pub fn from_hash(hash: Hash) -> Self {
-        let mut bytes = [0_u8; HASH16_SIZE];
-        bytes.copy_from_slice(&hash.as_bytes()[..HASH16_SIZE]);
-        Self(bytes)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashParseError;
@@ -124,20 +95,17 @@ impl<'de> Deserialize<'de> for Hash {
     }
 }
 
-impl fmt::Display for Hash16 {
+impl fmt::Display for Hash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.as_bytes() {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        format("", self, formatter)
     }
 }
 
-impl FromStr for Hash16 {
+impl FromStr for Hash {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse16("", value)
+        parse("", value)
     }
 }
 
@@ -169,36 +137,6 @@ pub fn parse(prefix: &str, value: &str) -> Result<Hash, HashParseError> {
     }
 
     Ok(Hash::from_bytes(bytes))
-}
-
-pub fn format16(prefix: &str, hash: &Hash16, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    formatter.write_str(prefix)?;
-
-    for byte in hash.as_bytes() {
-        write!(formatter, "{byte:02x}")?;
-    }
-
-    Ok(())
-}
-
-pub fn parse16(prefix: &str, value: &str) -> Result<Hash16, HashParseError> {
-    let encoded = value.strip_prefix(prefix).ok_or(HashParseError)?;
-
-    if encoded.len() != HASH16_SIZE * 2 {
-        return Err(HashParseError);
-    }
-
-    let encoded = encoded.as_bytes();
-    let mut bytes = [0_u8; HASH16_SIZE];
-
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        let offset = index * 2;
-        let high = hex_nibble(encoded[offset]).ok_or(HashParseError)?;
-        let low = hex_nibble(encoded[offset + 1]).ok_or(HashParseError)?;
-        *byte = (high << 4) | low;
-    }
-
-    Ok(Hash16::from_bytes(bytes))
 }
 
 const fn hex_nibble(byte: u8) -> Option<u8> {
@@ -379,11 +317,103 @@ pub fn domain_hash(domain: HashDomain, bytes: &[u8]) -> Hash {
     self::domain(domain, bytes)
 }
 
-/// SHA3-256 with the same XPARQ domain separation, truncated to 128 bits.
-/// Only use this for compact native object identifiers.
-pub fn domain16(domain: HashDomain, bytes: &[u8]) -> Hash16 {
-    let full = self::domain(domain, bytes);
-    let mut short = [0_u8; HASH16_SIZE];
-    short.copy_from_slice(&full.as_bytes()[..HASH16_SIZE]);
-    Hash16::from_bytes(short)
+/// Hash canonical serialization with the historical domain/length framing.
+/// The declared length is checked against the actual stream before returning a hash.
+pub fn domain_serialized<T: BorshSerialize>(
+    domain: HashDomain,
+    encoded_len: u64,
+    value: &T,
+) -> Result<Hash, crate::CodecError> {
+    use std::io::{BufWriter, Write};
+    struct HashWriter {
+        hasher: Sha3_256,
+        remaining: u64,
+    }
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let len = u64::try_from(bytes.len()).map_err(std::io::Error::other)?;
+            self.remaining = self
+                .remaining
+                .checked_sub(len)
+                .ok_or_else(|| std::io::Error::other("canonical length exceeded"))?;
+            self.hasher.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter {
+        hasher: Sha3_256::new(),
+        remaining: encoded_len,
+    };
+    writer.hasher.update(domain.tag());
+    writer.hasher.update(encoded_len.to_le_bytes());
+    {
+        let mut buffer = BufWriter::with_capacity(64 * 1024, &mut writer);
+        value
+            .serialize(&mut buffer)
+            .map_err(|_| crate::CodecError::EncodeFailed)?;
+        buffer
+            .flush()
+            .map_err(|_| crate::CodecError::EncodeFailed)?;
+    }
+    if writer.remaining != 0 {
+        return Err(crate::CodecError::EncodeFailed);
+    }
+    let mut hash = [0; HASH_SIZE];
+    hash.copy_from_slice(&writer.hasher.finalize());
+    Ok(Hash(hash))
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use crate::{CodecError, canonical_bytes, canonical_length};
+    #[test]
+    fn streaming_matches_original_and_rejects_wrong_lengths() {
+        for len in [0, 1, 31, 65535, 65536, 65537, 1_048_576] {
+            let value = (17u64, vec![9u8; len], vec![vec![4u8; 23]; 7]);
+            let bytes = canonical_bytes(&value).unwrap();
+            let count = canonical_length(&value).unwrap();
+            assert_eq!(count, bytes.len() as u64);
+            for tag in [
+                HashDomain::ProtocolState,
+                HashDomain::Raw,
+                HashDomain::Asset,
+            ] {
+                assert_eq!(
+                    domain_serialized(tag, count, &value).unwrap(),
+                    domain(tag, &bytes)
+                );
+                assert_eq!(
+                    domain_serialized(tag, count + 1, &value),
+                    Err(CodecError::EncodeFailed)
+                );
+                assert_eq!(
+                    domain_serialized(tag, count - 1, &value),
+                    Err(CodecError::EncodeFailed)
+                );
+            }
+        }
+    }
+    #[test]
+    fn serialization_failure_is_not_a_hash() {
+        struct Failing;
+        impl BorshSerialize for Failing {
+            fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+                writer.write_all(&[1, 2, 3])?;
+                Err(std::io::Error::other("failure"))
+            }
+        }
+        assert_eq!(canonical_length(&Failing), Err(CodecError::EncodeFailed));
+        assert_eq!(
+            domain_serialized(HashDomain::Raw, 3, &Failing),
+            Err(CodecError::EncodeFailed)
+        );
+        assert_eq!(
+            crate::canonical_fixed_map_length(1, u64::MAX),
+            Err(CodecError::EncodeFailed)
+        );
+    }
 }

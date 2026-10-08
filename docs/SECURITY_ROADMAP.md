@@ -26,7 +26,7 @@ before registry insertion. These controls must remain covered when paths change.
 | 1. Bind transitions to expected state | Implemented | Tampered prestate/journal or wrong parent root must fail without canonical mutation. |
 | 2. Failure atomicity | Implemented; focused coverage exists | Failed payment, application effect, block or rollback must leave complete canonical state unchanged. Continue reviewing persistence/reorg failure boundaries. |
 | 3. Bound consensus/decoding work | Implemented limits; ongoing resource review | Oversized prefixes/payloads must fail before unbounded allocation or expensive validation. Measure RPC, P2P and replay paths rather than assuming byte caps bound CPU. |
-| 4. Deterministic vectors | Verification incomplete | Reconcile current chain-spec identity fixtures, then confirm state bytes/roots and accounting through replay and rollback. |
+| 4. Deterministic vectors | Current fixtures reconciled and tests passed | Preserve chain-spec 8 vectors and state bytes/roots/accounting through replay and rollback when rules change. |
 | 5. Audit protections | Pending comprehensive audit | Record findings and focused regressions for arithmetic, canonical encoding, authorization, startup and reorg behavior. |
 
 ## Current consensus limits
@@ -54,8 +54,9 @@ measurements or a review of validation order.
 
 Keep permanent vectors for authorization, canonical operation/block bytes,
 coin and asset supply, program state, roots, replay and rollback. Three existing
-chain-spec fixture assertions currently expect older identity bytes; their gate
-is open. Do not mark Phase 4 complete until the intended identity is reconciled.
+chain-spec fixture assertions are reconciled for version 8 and passed on
+8 October 2026, including execution, replay and rollback. Keep this gate passing
+for every intentional consensus change.
 
 Check block-level accounting alongside individual transitions:
 
@@ -75,6 +76,8 @@ Run format, compilation, Clippy, focused regressions and the full workspace
 suite. Complete fresh-storage replay, snapshot/restart and reorganization checks,
 including the three-node Program lifecycle and explicitly enabled wallet CLI
 integration tests. The three-node lifecycle and both wallet CLI lifecycle tests passed on
-3 October 2026. These successes do not close the outstanding chain-spec fixture
-gate or substitute for the full workspace suite. Commands and current limitations are listed in
+3 October 2026. On 8 October 2026, the full default workspace suite and
+`litep2p-devnet` all-target check passed after the salted-account/share32 reset;
+chain-spec fixtures also passed. The ignored wallet CLI lifecycle tests were not
+rerun in that default suite. Commands and current limitations are listed in
 [ProgramCall verification](PROGRAM_CALL.md#verification-status-and-remaining-gates).

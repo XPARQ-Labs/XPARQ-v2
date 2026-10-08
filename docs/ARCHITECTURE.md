@@ -12,6 +12,7 @@ uses kernel directly. Kernel has no dependency on extension.
 | [monetary application](../extension/src/monetary/mod.rs) | Shared monetary program: coin transfer and asset create/mint/transfer/burn through checked hosts |
 | [runtime](../runtime/src/main.rs) | Persistence, network, mempool, mining, RPC and application installation |
 | [wallet](../wallet/README.md) | Signing, payment selection and user workflows over RPC |
+| [devkit](../devkit/README.md) | XPVM assembler, kernel bytecode validation and isolated devnet workflows |
 
 ## What is a program?
 
@@ -62,7 +63,28 @@ Kernel monetary validation remains authoritative. See [v4](XPVM.md#application-b
 ## Program ownership
 
 The ledger has one ownership variant: `Owner::Program(ProgramId)`. A wallet is
-an implicit instance of the system signature policy; its key identity determines
+an implicit instance of the system signature policy; its policy, signature scheme, public key and salt determine
 its instance ID without deployment or stored account metadata. Deployed instances
 use their bytecode policy and cannot spend through the implicit signature path.
 See [ownership](OWNERSHIP.md) for resolution, authorization and compatibility.
+
+## Identity and protocol compatibility
+
+ProgramId is the shared identity of signature-policy accounts and deployed
+programs, not only a replacement display address. Coin and asset Share IDs are
+separate 32-byte domain-separated SHA3-256 identifiers. `SystemProgramId(0)` is
+the unified monetary dispatcher route, not an ownership ProgramId; monetary
+opcode 1 selects transfer. Account IDs bind policy/scheme/key/salt; deployed IDs
+bind deployer/nonce/code hash. An asset contract ID identifies the asset record.
+
+The current chain-spec is 8, database schema is 16, snapshot format is 3 and
+wallet file format is 2. Old chain databases are rejected; no migration is
+provided. See [ProgramCall compatibility](PROGRAM_CALL.md#storage-and-compatibility).
+
+Application extensibility is bounded by the existing XPVM instructions and hosts.
+The VM hashes bytes with XPARQ Raw-domain SHA3-256, while root transaction
+signature authorization supports ML-DSA44/65/87. Alternative signature or ZK
+verifiers are not currently supplied. Other source languages need a compiler
+that targets supported XPVM bytecode; arbitrary native, WASM, EVM or Cairo
+binaries are not accepted. Adding native primitives or changing consensus
+semantics requires updating nodes; deploying new supported bytecode does not.

@@ -313,11 +313,12 @@ mod tests {
             },
             payment: CoinTransition::coin(
                 owner,
-                vec![kernel::monetary::coin::CoinShare::from_bytes([1; 16])],
+                vec![kernel::monetary::coin::CoinShare::from_bytes([1; 32])],
                 vec![kernel::monetary::coin::CoinOutput::new(owner, Zeno::ONE)],
             )
             .unwrap(),
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(b"storage-stress"),
             },

@@ -64,8 +64,7 @@ pub(crate) fn settle_with_inputs(
         } else {
             state
                 .utxos
-                .coins()
-                .filter(|(_, value)| value.owner == actor)
+                .coins_by_owner(actor)
                 .take(MAX_TRANSFER_INPUTS)
                 .map(|(share, value)| (share, *value))
                 .collect()
@@ -169,12 +168,10 @@ pub(crate) fn settle_with_inputs(
         for (share, value) in state
             .extensions
             .assets
-            .shares()
-            .iter()
-            .filter(|(_, value)| value.owner == actor && value.asset == asset)
+            .shares_by_owner_asset(actor, asset)
             .take(MAX_TRANSFER_INPUTS)
         {
-            inputs.push(*share);
+            inputs.push(share);
             total = total
                 .checked_add(value.amount)
                 .ok_or(StateError::AmountOverflow)?;
@@ -344,6 +341,7 @@ mod tests {
                 call: call.clone(),
                 payment,
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: seed.public_key(),
                     signature: seed.sign(commitment.as_bytes()),
                 },
@@ -432,7 +430,7 @@ mod tests {
         state
             .utxos
             .insert_coin(
-                CoinShare::from_bytes([1; 16]),
+                CoinShare::from_bytes([1; 32]),
                 CoinUtxo {
                     amount: initial,
                     owner: Owner::Program(signer),
@@ -578,6 +576,7 @@ mod tests {
             call,
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },
@@ -622,7 +621,17 @@ mod tests {
         let tx = signed(&state, &seed, chain, call, vec![]);
         // Make the asset leg impossible while leaving the coin leg funded.
         let mut staged = state.clone();
-        staged.extensions.assets.shares.clear();
+        staged.extensions.assets = borsh::from_slice(
+            &borsh::to_vec(&(
+                staged.extensions.assets.records(),
+                std::collections::BTreeMap::<
+                    crate::monetary::asset::Share,
+                    crate::monetary::asset::AssetShare,
+                >::new(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         let before = staged.clone();
         assert!(staged.apply_program_call(tx, signer, chain, 4).is_err());
         assert_eq!(staged, before);

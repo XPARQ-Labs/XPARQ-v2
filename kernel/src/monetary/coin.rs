@@ -1,5 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use crypto::{ProgramId, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, domain16};
+use crypto::{HASH_SIZE, Hash, HashDomain, HashParseError, ProgramId, domain};
 use std::{fmt, str::FromStr};
 
 pub const DECIMALS: u8 = 8;
@@ -118,19 +118,19 @@ impl FromStr for CoinContract {
 
 /// Unique identifier of one concrete XPQ share / UTXO.
 ///
-/// Internally derived using SHA3-256 and truncated to 128 bits.
+/// Derived using the full domain-separated SHA3-256 hash.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
 )]
-pub struct CoinShare(Hash16);
+pub struct CoinShare(Hash);
 
 impl CoinShare {
-    pub const SIZE: usize = HASH16_SIZE;
+    pub const SIZE: usize = HASH_SIZE;
     pub const ZENO_PER_COIN: u64 = 10u64.pow(DECIMALS as u32);
 
     /// Derive an XPQ share created by protocol emission.
     ///
-    /// CoinShare = H16(
+    /// CoinShare = H(
     ///     XPQ CoinContract
     ///     || emission origin
     /// )
@@ -142,12 +142,12 @@ impl CoinShare {
         bytes[..HASH_SIZE].copy_from_slice(contract.as_bytes());
         bytes[HASH_SIZE..].copy_from_slice(origin);
 
-        Self(domain16(HashDomain::Emission, &bytes))
+        Self(domain(HashDomain::Emission, &bytes))
     }
 
     /// Derive an XPQ share created by a program call output.
     ///
-    /// CoinShare = H16(
+    /// CoinShare = H(
     ///     XPQ CoinContract
     ///     || CoinTransitionCommitment
     ///     || output index
@@ -163,41 +163,41 @@ impl CoinShare {
 
         bytes[HASH_SIZE + HASH_SIZE..].copy_from_slice(&index.to_le_bytes());
 
-        Self(domain16(HashDomain::Output, &bytes))
+        Self(domain(HashDomain::Output, &bytes))
     }
 
-    pub const fn from_hash(hash: Hash16) -> Self {
+    pub const fn from_hash(hash: Hash) -> Self {
         Self(hash)
     }
 
-    pub const fn from_bytes(bytes: [u8; HASH16_SIZE]) -> Self {
-        Self(Hash16::from_bytes(bytes))
+    pub const fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
+        Self(Hash::from_bytes(bytes))
     }
 
-    pub const fn as_hash(&self) -> &Hash16 {
+    pub const fn as_hash(&self) -> &Hash {
         &self.0
     }
 
-    pub const fn into_hash(self) -> Hash16 {
+    pub const fn into_hash(self) -> Hash {
         self.0
     }
 
-    pub const fn as_bytes(&self) -> &[u8; HASH16_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
         self.0.as_bytes()
     }
 
-    pub const fn into_bytes(self) -> [u8; HASH16_SIZE] {
+    pub const fn into_bytes(self) -> [u8; HASH_SIZE] {
         self.0.into_bytes()
     }
 }
 
-impl From<Hash16> for CoinShare {
-    fn from(hash: Hash16) -> Self {
+impl From<Hash> for CoinShare {
+    fn from(hash: Hash) -> Self {
         Self(hash)
     }
 }
 
-impl From<CoinShare> for Hash16 {
+impl From<CoinShare> for Hash {
     fn from(share: CoinShare) -> Self {
         share.0
     }
@@ -213,7 +213,7 @@ impl FromStr for CoinShare {
     type Err = HashParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Hash16>().map(Self)
+        value.parse::<Hash>().map(Self)
     }
 }
 
@@ -232,12 +232,19 @@ mod tests {
     }
 
     #[test]
-    fn coin_share_is_16_bytes() {
-        let share = CoinShare::from_bytes([0xab; HASH16_SIZE]);
-        let encoded = "ab".repeat(HASH16_SIZE);
+    fn coin_share_is_32_bytes() {
+        let share = CoinShare::from_bytes([0xab; HASH_SIZE]);
+        let encoded = "ab".repeat(HASH_SIZE);
 
         assert_eq!(share.to_string(), encoded);
         assert_eq!(encoded.parse::<CoinShare>(), Ok(share));
+        assert_eq!(core::mem::size_of::<CoinShare>(), 32);
+        assert_eq!(crypto::canonical_bytes(&share).unwrap().len(), 32);
+        assert!("ab".repeat(16).parse::<CoinShare>().is_err());
+        assert!(crypto::canonical_decode::<CoinShare>(&[0xab; 16]).is_err());
+        let mut different = share.into_bytes();
+        different[31] ^= 1;
+        assert_ne!(share, CoinShare::from_bytes(different));
         assert!(format!("XPQ:{encoded}").parse::<CoinShare>().is_err());
     }
 }
@@ -278,7 +285,10 @@ pub struct CoinOutput {
 
 impl CoinOutput {
     pub const fn to_owner(recipient: crate::common::Owner, amount: Zeno) -> Self {
-        Self { output: recipient, amount }
+        Self {
+            output: recipient,
+            amount,
+        }
     }
     pub const fn new(recipient: ProgramId, amount: Zeno) -> Self {
         Self {
@@ -286,4 +296,21 @@ impl CoinOutput {
             amount,
         }
     }
+}
+
+#[test]
+fn coin_shares_use_full_domain_hashes() {
+    let origin = [0x11; HASH_SIZE];
+    let mut emission = CoinContract::derive().as_bytes().to_vec();
+    emission.extend_from_slice(&origin);
+    assert_eq!(
+        CoinShare::from_emission(&origin).into_hash(),
+        domain(HashDomain::Emission, &emission)
+    );
+    let mut output = emission;
+    output.extend_from_slice(&7u32.to_le_bytes());
+    assert_eq!(
+        CoinShare::from_output(&origin, 7).into_hash(),
+        domain(HashDomain::Output, &output)
+    );
 }

@@ -1,6 +1,9 @@
 //! Checked asset monetary operations, canonical state, and rollback journals.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -12,7 +15,7 @@ use super::asset::{AssetContract, AssetError, AssetShare, Metadata, Share, Unit}
 
 pub use super::asset::AssetRecord;
 
-use crate::common::Owner;
+use crate::{common::Owner, state_map::StateMap};
 
 use crate::program::system::asset_program::type_::AssetCall;
 
@@ -40,12 +43,53 @@ use crate::program::system::asset_program::type_::AssetCall;
 
 /// ```
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize)]
 
 pub struct AssetState {
-    pub(crate) records: BTreeMap<AssetContract, AssetRecord>,
+    // Writes detach only affected paths; tree shape is not canonical state.
+    pub(crate) records: StateMap<AssetContract, AssetRecord>,
 
-    pub(crate) shares: BTreeMap<Share, AssetShare>,
+    shares: StateMap<Share, AssetShare>,
+    #[borsh(skip)]
+    by_owner: StateMap<Owner, StateMap<AssetContract, StateMap<Share, ()>>>,
+    #[borsh(skip)]
+    supply_cache: SupplyAuditCache,
+}
+
+#[derive(Clone, Default)]
+struct SupplyAuditCache(Arc<Mutex<Option<ValidatedAssetRoots>>>);
+#[derive(Clone)]
+struct ValidatedAssetRoots {
+    records: StateMap<AssetContract, AssetRecord>,
+    shares: StateMap<Share, AssetShare>,
+    totals: StateMap<AssetContract, Unit>,
+    dirty: StateMap<AssetContract, ()>,
+}
+impl PartialEq for SupplyAuditCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for SupplyAuditCache {}
+impl std::fmt::Debug for SupplyAuditCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SupplyAuditCache")
+    }
+}
+
+impl BorshDeserialize for AssetState {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let records = BTreeMap::deserialize_reader(reader)?;
+        let shares = BTreeMap::deserialize_reader(reader)?;
+        let mut state = Self {
+            records: records.into(),
+            shares: shares.into(),
+            by_owner: StateMap::default(),
+            supply_cache: SupplyAuditCache::default(),
+        };
+        state.rebuild_owner_index();
+        Ok(state)
+    }
 }
 
 /// The kernel must authenticate the caller and bind `commitment` to this call.
@@ -121,6 +165,177 @@ impl AssetJournal {
 }
 
 impl AssetState {
+    pub(crate) fn canonical_encoded_len(&self) -> Result<u64, crypto::CodecError> {
+        let Self {
+            records,
+            shares,
+            by_owner: _,
+            supply_cache: _,
+        } = self;
+        let width = crypto::canonical_length(&(
+            Share::from_bytes([0; crypto::HASH_SIZE]),
+            AssetShare::new(
+                AssetContract::from_bytes([0; HASH_SIZE]),
+                Unit::ZERO,
+                Owner::Program(crypto::ProgramId::ZERO),
+            ),
+        ))?;
+        crypto::canonical_length(records)?
+            .checked_add(crypto::canonical_fixed_map_length(shares.len(), width)?)
+            .ok_or(crypto::CodecError::EncodeFailed)
+    }
+
+    fn supply_snapshot(&self) -> Option<ValidatedAssetRoots> {
+        let Self {
+            records,
+            shares,
+            by_owner: _,
+            supply_cache,
+        } = self;
+        supply_cache
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|key| records.shares_root(&key.records) && shares.shares_root(&key.shares))
+            .cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_supply_valid(&self) -> bool {
+        self.supply_snapshot()
+            .is_some_and(|key| key.dirty.is_empty())
+    }
+
+    pub(crate) fn remember_valid_supply(&self, totals: BTreeMap<AssetContract, Unit>) {
+        let key = ValidatedAssetRoots {
+            records: self.records.clone(),
+            shares: self.shares.clone(),
+            totals: totals.into(),
+            dirty: StateMap::default(),
+        };
+        *self
+            .supply_cache
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(key);
+    }
+
+    /// Return None when a full audit is required. Only a successful full audit
+    /// establishes a baseline; touched journals then carry it across mutations.
+    pub(crate) fn validate_incremental_supply(
+        &self,
+    ) -> Option<Result<(), crate::ledger::LedgerError>> {
+        use crate::ledger::LedgerError;
+        let mut key = self.supply_snapshot()?;
+        // Unknown shares take precedence over record accounting errors, as in the full audit.
+        for asset in key.dirty.keys() {
+            if !key
+                .totals
+                .get(asset)
+                .copied()
+                .unwrap_or(Unit::ZERO)
+                .is_zero()
+                && !self.records.contains_key(asset)
+            {
+                return Some(Err(LedgerError::UnknownAssetShare));
+            }
+        }
+        for asset in key.dirty.keys() {
+            if let Some(record) = self.records.get(asset) {
+                if record.metadata.validate().is_err() {
+                    return Some(Err(LedgerError::InvalidAssetState));
+                }
+                if record.total_minted > record.metadata.max_supply
+                    || record.total_minted.checked_sub(record.total_burned) != Some(record.supply)
+                    || key.totals.get(asset).copied().unwrap_or(Unit::ZERO) != record.supply
+                {
+                    return Some(Err(LedgerError::AssetSupplyMismatch));
+                }
+            }
+        }
+        key.dirty.clear();
+        // Another fork can replace this shared slot; its root guards remain authoritative.
+        *self
+            .supply_cache
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(key);
+        Some(Ok(()))
+    }
+
+    fn advance_supply_summary(
+        &mut self,
+        previous: Option<ValidatedAssetRoots>,
+        journal: &AssetJournal,
+    ) {
+        let updated = previous.and_then(|mut key| {
+            for (asset, _) in &journal.records {
+                key.dirty.insert(*asset, ());
+            }
+            // Subtract all old shares first: valid transfers cannot overflow temporarily.
+            for (_, old) in &journal.shares {
+                if let Some(share) = old {
+                    if share.amount.is_zero() {
+                        return None;
+                    }
+                    key.dirty.insert(share.asset, ());
+                    let total = key
+                        .totals
+                        .get(&share.asset)
+                        .copied()
+                        .unwrap_or(Unit::ZERO)
+                        .checked_sub(share.amount)?;
+                    if total.is_zero() {
+                        key.totals.remove(&share.asset);
+                    } else {
+                        key.totals.insert(share.asset, total);
+                    }
+                }
+            }
+            for (id, _) in &journal.shares {
+                if let Some(share) = self.shares.get(id) {
+                    if share.amount.is_zero() {
+                        return None;
+                    }
+                    key.dirty.insert(share.asset, ());
+                    let total = key
+                        .totals
+                        .get(&share.asset)
+                        .copied()
+                        .unwrap_or(Unit::ZERO)
+                        .checked_add(share.amount)?;
+                    key.totals.insert(share.asset, total);
+                }
+            }
+            key.records = self.records.clone();
+            key.shares = self.shares.clone();
+            Some(key)
+        });
+        // Detach the slot when this fork changes; other forks keep their own baseline.
+        self.supply_cache = SupplyAuditCache(Arc::new(Mutex::new(updated)));
+    }
+    pub(crate) fn same_canonical_view(&self, other: &Self) -> bool {
+        let Self {
+            records,
+            shares,
+            by_owner: _,
+            supply_cache: _,
+        } = self;
+        records.shares_root(&other.records) && shares.shares_root(&other.shares)
+    }
+    fn rebuild_owner_index(&mut self) {
+        let by_owner = &mut self.by_owner;
+        by_owner.clear();
+        for (&id, share) in self.shares.iter() {
+            by_owner
+                .entry(share.owner)
+                .or_default()
+                .entry(share.asset)
+                .or_default()
+                .insert(id, ());
+        }
+    }
     /// Read-only asset accounting records. Mutation is restricted to the kernel.
 
     ///
@@ -135,7 +350,7 @@ impl AssetState {
 
     /// ```
 
-    pub fn records(&self) -> &BTreeMap<AssetContract, AssetRecord> {
+    pub fn records(&self) -> &StateMap<AssetContract, AssetRecord> {
         &self.records
     }
 
@@ -153,8 +368,74 @@ impl AssetState {
 
     /// ```
 
-    pub fn shares(&self) -> &BTreeMap<Share, AssetShare> {
+    pub fn shares(&self) -> &StateMap<Share, AssetShare> {
         &self.shares
+    }
+
+    /// Ordered by asset then share ID; entries always resolve through the primary map.
+    pub fn shares_by_owner(&self, owner: Owner) -> impl Iterator<Item = (Share, &AssetShare)> + '_ {
+        self.by_owner
+            .get(&owner)
+            .into_iter()
+            .flat_map(|assets| assets.values())
+            .flat_map(|ids| ids.keys())
+            .filter_map(move |id| {
+                self.shares
+                    .get(id)
+                    .filter(|share| share.owner == owner)
+                    .map(|share| (*id, share))
+            })
+    }
+
+    /// Preserve historical per-asset share-ID ordering for bounded input selection.
+    pub fn shares_by_owner_asset(
+        &self,
+        owner: Owner,
+        asset: AssetContract,
+    ) -> impl Iterator<Item = (Share, &AssetShare)> + '_ {
+        self.by_owner
+            .get(&owner)
+            .and_then(|assets| assets.get(&asset))
+            .into_iter()
+            .flat_map(|ids| ids.keys())
+            .filter_map(move |id| {
+                self.shares
+                    .get(id)
+                    .filter(|share| share.owner == owner && share.asset == asset)
+                    .map(|share| (*id, share))
+            })
+    }
+
+    fn remove_share(&mut self, id: &Share) -> Option<AssetShare> {
+        let share = *self.shares.get(id)?;
+        self.shares.remove(id);
+        let by_owner = &mut self.by_owner;
+        if let Some(assets) = by_owner.get_mut(&share.owner) {
+            if let Some(ids) = assets.get_mut(&share.asset) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    assets.remove(&share.asset);
+                }
+            }
+            if assets.is_empty() {
+                by_owner.remove(&share.owner);
+            }
+        }
+        Some(share)
+    }
+
+    fn put_share(&mut self, id: Share, share: AssetShare) {
+        if self.shares.get(&id) == Some(&share) {
+            return;
+        }
+        self.remove_share(&id);
+        self.by_owner
+            .entry(share.owner)
+            .or_default()
+            .entry(share.asset)
+            .or_default()
+            .insert(id, ());
+        self.shares.insert(id, share);
     }
 
     /// Apply a checked monetary instruction; application dispatch belongs to extension.
@@ -183,9 +464,16 @@ impl AssetState {
         crate::program::system::asset_program::decode(opcode as u8, &payload)
             .map_err(|_| AssetError::InvalidProgram)?;
 
+        let previous_supply = self.supply_snapshot();
         let mut journal = self.snapshot_operation(call, context)?;
         if let Err(error) = self.apply_monetary_operation(call, context) {
             self.rollback(journal);
+            self.supply_cache =
+                SupplyAuditCache(Arc::new(Mutex::new(previous_supply.map(|mut key| {
+                    key.records = self.records.clone();
+                    key.shares = self.shares.clone();
+                    key
+                }))));
             return Err(error);
         }
         // Preserve the historical journal encoding: sorted keys, changed values only.
@@ -195,6 +483,7 @@ impl AssetState {
         journal
             .shares
             .retain(|(key, previous)| self.shares.get(key) != previous.as_ref());
+        self.advance_supply_summary(previous_supply, &journal);
         Ok(journal)
     }
 
@@ -248,29 +537,52 @@ impl AssetState {
         context: ExecutionContext,
     ) -> Result<Self, AssetError> {
         let journal = self.snapshot_operation(call, context)?;
-        Ok(Self {
+        let mut view = Self {
             records: journal
                 .records
                 .into_iter()
                 .filter_map(|(key, value)| value.map(|value| (key, value)))
-                .collect(),
+                .collect::<BTreeMap<_, _>>()
+                .into(),
             shares: journal
                 .shares
                 .into_iter()
                 .filter_map(|(key, value)| value.map(|value| (key, value)))
-                .collect(),
-        })
+                .collect::<BTreeMap<_, _>>()
+                .into(),
+            ..Self::default()
+        };
+        view.rebuild_owner_index();
+        Ok(view)
     }
 
     pub(crate) fn rollback(&mut self, journal: AssetJournal) {
+        let previous_supply = self.supply_snapshot();
+        let before = AssetJournal {
+            records: journal
+                .records
+                .iter()
+                .map(|(key, _)| (*key, self.records.get(key).cloned()))
+                .collect(),
+            shares: journal
+                .shares
+                .iter()
+                .map(|(key, _)| (*key, self.shares.get(key).copied()))
+                .collect(),
+        };
         for (key, previous) in journal.records {
+            if self.records.get(&key) == previous.as_ref() {
+                continue;
+            }
             match previous {
                 Some(record) => {
                     self.records.insert(key, record);
                 }
 
                 None => {
-                    self.records.remove(&key);
+                    if self.records.contains_key(&key) {
+                        self.records.remove(&key);
+                    }
                 }
             }
         }
@@ -278,14 +590,15 @@ impl AssetState {
         for (key, previous) in journal.shares {
             match previous {
                 Some(share) => {
-                    self.shares.insert(key, share);
+                    self.put_share(key, share);
                 }
 
                 None => {
-                    self.shares.remove(&key);
+                    self.remove_share(&key);
                 }
             }
         }
+        self.advance_supply_summary(previous_supply, &before);
     }
 
     fn input_total(
@@ -336,8 +649,7 @@ impl AssetState {
             return Err(AssetError::ShareAlreadyExists);
         }
 
-        self.shares
-            .insert(id, AssetShare::new(asset, amount, owner));
+        self.put_share(id, AssetShare::new(asset, amount, owner));
 
         Ok(())
     }
@@ -483,7 +795,7 @@ impl AssetState {
                 }
 
                 for input in &call.inputs {
-                    self.shares.remove(input);
+                    self.remove_share(input);
                 }
 
                 for (index, output) in call.outputs.iter().enumerate() {
@@ -531,7 +843,7 @@ impl AssetState {
                     .ok_or(AssetError::SupplyOverflow)?;
 
                 for input in &call.inputs {
-                    self.shares.remove(input);
+                    self.remove_share(input);
                 }
 
                 if !call.output.is_zero() {
@@ -570,13 +882,663 @@ mod tests {
         type_::{Burn, Mint, Register, Transfer},
     };
 
+    fn supply_fixture() -> crate::ledger::LedgerState {
+        let mut state = crate::ledger::LedgerState::default();
+        let owner = Owner::Program(ProgramId([61; 32]));
+        state
+            .extensions
+            .assets
+            .apply(
+                &AssetCall::Register(Register {
+                    name: "SupplyCache".into(),
+                    max_supply: Unit::from_units(100),
+                    initial_mint: Unit::from_units(10),
+                    mint_authority: owner,
+                    nonce: 1,
+                }),
+                ExecutionContext {
+                    actor: owner,
+                    commitment: [1; 32],
+                },
+            )
+            .unwrap();
+        state
+    }
+
+    fn assert_incremental_totals(state: &crate::ledger::LedgerState) {
+        let key = state
+            .extensions
+            .assets
+            .supply_snapshot()
+            .expect("tracked roots");
+        let mut totals = BTreeMap::new();
+        for share in state.extensions.assets.shares.values() {
+            let entry = totals.entry(share.asset).or_insert(Unit::ZERO);
+            *entry = entry.checked_add(share.amount).unwrap();
+        }
+        assert_eq!(
+            key.totals
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect::<BTreeMap<_, _>>(),
+            totals
+        );
+    }
+
+    #[test]
+    fn incremental_supply_tracks_pending_multi_asset_operations_failure_and_reverse_journals() {
+        let mut state = supply_fixture();
+        state.validate_supply_invariants().unwrap();
+        let original = state.clone();
+        let owner = Owner::Program(ProgramId([61; 32]));
+        let first = *state.extensions.assets.records.keys().next().unwrap();
+        let context = |tag| ExecutionContext {
+            actor: owner,
+            commitment: [tag; 32],
+        };
+        let mut journals = Vec::new();
+        journals.push(
+            state
+                .extensions
+                .assets
+                .apply(
+                    &AssetCall::Register(Register {
+                        name: "SecondAsset".into(),
+                        max_supply: Unit::from_units(u128::MAX),
+                        initial_mint: Unit::from_units(u128::MAX),
+                        mint_authority: owner,
+                        nonce: 2,
+                    }),
+                    context(2),
+                )
+                .unwrap(),
+        );
+        let second = *state
+            .extensions
+            .assets
+            .records
+            .keys()
+            .find(|id| **id != first)
+            .unwrap();
+        let input = Share::derive(second, [2; 32], 0);
+        // Two outputs at the u128 boundary exercise subtract-before-add summaries.
+        journals.push(
+            state
+                .extensions
+                .assets
+                .apply(
+                    &AssetCall::Transfer(Transfer {
+                        asset: second,
+                        inputs: vec![input],
+                        outputs: vec![
+                            AssetOutput::new(owner, Unit::from_units(u128::MAX - 1)),
+                            AssetOutput::new(owner, Unit::from_units(1)),
+                        ],
+                    }),
+                    context(3),
+                )
+                .unwrap(),
+        );
+        journals.push(
+            state
+                .extensions
+                .assets
+                .apply(
+                    &AssetCall::Mint(Mint {
+                        asset: first,
+                        amount: Unit::from_units(5),
+                        recipient: owner,
+                        nonce: 1,
+                    }),
+                    context(4),
+                )
+                .unwrap(),
+        );
+        let input = Share::derive(first, [1; 32], 0);
+        // Output collides after the old input has been consumed; all summaries must restore.
+        let before_error = state.clone();
+        assert_eq!(
+            state.extensions.assets.apply(
+                &AssetCall::Transfer(Transfer {
+                    asset: first,
+                    inputs: vec![input],
+                    outputs: vec![AssetOutput::new(owner, Unit::from_units(10))],
+                }),
+                context(4)
+            ),
+            Err(AssetError::ShareAlreadyExists)
+        );
+        assert_eq!(state, before_error);
+        assert_incremental_totals(&state);
+        assert_eq!(
+            state
+                .extensions
+                .assets
+                .supply_snapshot()
+                .unwrap()
+                .dirty
+                .len(),
+            2
+        );
+        state.validate_supply_invariants().unwrap();
+        assert!(state.extensions.assets.cached_supply_valid());
+        assert!(original.extensions.assets.cached_supply_valid());
+        let input = Share::derive(second, [3; 32], 1);
+        journals.push(
+            state
+                .extensions
+                .assets
+                .apply(
+                    &AssetCall::Burn(Burn {
+                        asset: second,
+                        inputs: vec![input],
+                        amount: Unit::from_units(1),
+                        output: Unit::ZERO,
+                    }),
+                    context(5),
+                )
+                .unwrap(),
+        );
+        assert_incremental_totals(&state);
+        state.validate_supply_invariants().unwrap();
+        state.audit_supply_invariants().unwrap();
+        for journal in journals.into_iter().rev() {
+            state.extensions.assets.rollback(journal);
+            assert_incremental_totals(&state);
+            state.validate_supply_invariants().unwrap();
+            state.audit_supply_invariants().unwrap();
+        }
+        assert_eq!(state, original);
+        assert_eq!(
+            borsh::to_vec(&state).unwrap(),
+            borsh::to_vec(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_summary_missing_or_stale_falls_back_and_never_skips_untracked_changes() {
+        let mut state = supply_fixture();
+        state.validate_supply_invariants().unwrap();
+        let owner = Owner::Program(ProgramId([61; 32]));
+        let asset = *state.extensions.assets.records.keys().next().unwrap();
+        let call = AssetCall::Mint(Mint {
+            asset,
+            amount: Unit::from_units(1),
+            recipient: owner,
+            nonce: 1,
+        });
+        state
+            .extensions
+            .assets
+            .apply(
+                &call,
+                ExecutionContext {
+                    actor: owner,
+                    commitment: [2; 32],
+                },
+            )
+            .unwrap();
+        assert_incremental_totals(&state);
+        // A raw record mutation is outside the tracked operation path.
+        state
+            .extensions
+            .assets
+            .records
+            .get_mut(&asset)
+            .unwrap()
+            .supply = Unit::from_units(10);
+        assert!(state.extensions.assets.supply_snapshot().is_none());
+        assert!(matches!(
+            state.validate_supply_invariants(),
+            Err(crate::ledger::LedgerError::AssetSupplyMismatch)
+        ));
+        assert!(state.extensions.assets.supply_snapshot().is_none());
+        state
+            .extensions
+            .assets
+            .apply(
+                &AssetCall::Mint(Mint {
+                    asset,
+                    amount: Unit::from_units(1),
+                    recipient: owner,
+                    nonce: 2,
+                }),
+                ExecutionContext {
+                    actor: owner,
+                    commitment: [3; 32],
+                },
+            )
+            .unwrap();
+        // A successful later call cannot bless a stale baseline or hide earlier corruption.
+        assert!(state.extensions.assets.supply_snapshot().is_none());
+        assert!(matches!(
+            state.validate_supply_invariants(),
+            Err(crate::ledger::LedgerError::AssetSupplyMismatch)
+        ));
+        let restored =
+            crate::ledger::LedgerState::try_from_slice(&borsh::to_vec(&state).unwrap()).unwrap();
+        assert!(restored.extensions.assets.supply_snapshot().is_none());
+        assert!(restored.audit_supply_invariants().is_err());
+    }
+
+    #[test]
+    fn incremental_validation_rejects_incorrect_tracked_accounting_without_clearing_pending() {
+        use crate::ledger::LedgerError;
+        for case in 0..3 {
+            let mut state = supply_fixture();
+            state.validate_supply_invariants().unwrap();
+            let assets = &mut state.extensions.assets;
+            let asset = *assets.records.keys().next().unwrap();
+            let prior = assets.supply_snapshot();
+            let journal = AssetJournal {
+                records: vec![(asset, assets.records.get(&asset).cloned())],
+                shares: vec![],
+            };
+            match case {
+                0 => assets.records.get_mut(&asset).unwrap().supply = Unit::from_units(9),
+                1 => assets.records.get_mut(&asset).unwrap().metadata.name = " invalid ".into(),
+                _ => {
+                    assets.records.remove(&asset);
+                }
+            }
+            // Simulate an incorrect kernel accounting update on the tracked path.
+            assets.advance_supply_summary(prior, &journal);
+            for _ in 0..2 {
+                let result = state.validate_supply_invariants();
+                assert!(matches!(
+                    (case, result),
+                    (0, Err(LedgerError::AssetSupplyMismatch))
+                        | (1, Err(LedgerError::InvalidAssetState))
+                        | (2, Err(LedgerError::UnknownAssetShare))
+                ));
+                assert_eq!(
+                    state
+                        .extensions
+                        .assets
+                        .supply_snapshot()
+                        .unwrap()
+                        .dirty
+                        .len(),
+                    1
+                );
+                assert!(state.audit_supply_invariants().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn successful_supply_cache_rejects_changed_invalid_records_and_shares() {
+        use crate::ledger::LedgerError;
+        let original = supply_fixture();
+        let encoded = borsh::to_vec(&original).unwrap();
+        assert!(!original.extensions.assets.cached_supply_valid());
+        original.validate_supply_invariants().unwrap();
+        assert!(original.extensions.assets.cached_supply_valid());
+        assert_eq!(borsh::to_vec(&original).unwrap(), encoded);
+        for case in 0..8 {
+            let mut fork = original.clone();
+            assert!(fork.extensions.assets.cached_supply_valid());
+            let assets = &mut fork.extensions.assets;
+            let asset = *assets.records.keys().next().unwrap();
+            let input = *assets.shares.keys().next().unwrap();
+            let share = *assets.shares.get(&input).unwrap();
+            match case {
+                0 => assets.put_share(
+                    input,
+                    AssetShare::new(asset, Unit::from_units(9), share.owner),
+                ),
+                1 => assets.put_share(input, AssetShare::new(asset, Unit::ZERO, share.owner)),
+                2 => assets.put_share(
+                    input,
+                    AssetShare::new(
+                        AssetContract::from_bytes([99; 32]),
+                        share.amount,
+                        share.owner,
+                    ),
+                ),
+                3 => assets.records.get_mut(&asset).unwrap().metadata.name = " bad name ".into(),
+                4 => assets.records.get_mut(&asset).unwrap().total_minted = Unit::from_units(101),
+                5 => {
+                    assets.records.remove(&asset);
+                }
+                6 => assets.put_share(
+                    Share::from_bytes([99; 32]),
+                    AssetShare::new(asset, Unit::from_units(u128::MAX), share.owner),
+                ),
+                _ => assets.records.get_mut(&asset).unwrap().supply = Unit::from_units(9),
+            }
+            assert!(!assets.cached_supply_valid());
+            for _ in 0..2 {
+                let error = fork.validate_supply_invariants().unwrap_err();
+                match case {
+                    1 | 3 => assert!(matches!(error, LedgerError::InvalidAssetState)),
+                    2 | 5 => assert!(matches!(error, LedgerError::UnknownAssetShare)),
+                    6 => assert!(matches!(error, LedgerError::SupplyOverflow)),
+                    _ => assert!(matches!(error, LedgerError::AssetSupplyMismatch)),
+                }
+                assert!(!fork.extensions.assets.cached_supply_valid());
+            }
+            let restored =
+                crate::ledger::LedgerState::try_from_slice(&borsh::to_vec(&fork).unwrap()).unwrap();
+            assert!(!restored.extensions.assets.cached_supply_valid());
+            assert!(restored.audit_supply_invariants().is_err());
+            assert!(original.extensions.assets.cached_supply_valid());
+            original.validate_supply_invariants().unwrap();
+        }
+    }
+
+    #[test]
+    fn supply_cache_keeps_coin_checks_and_audits_valid_forks_and_rollback() {
+        use crate::{
+            ledger::{CoinUtxo, LedgerError},
+            monetary::coin::{CoinShare, Zeno},
+        };
+        let original = supply_fixture();
+        original.validate_supply_invariants().unwrap();
+        let mut fork = original.clone();
+        let owner = Owner::Program(ProgramId([61; 32]));
+        fork.utxos
+            .insert_coin(
+                CoinShare::from_bytes([1; 32]),
+                CoinUtxo {
+                    amount: Zeno::ONE,
+                    owner,
+                },
+            )
+            .unwrap();
+        assert!(fork.extensions.assets.cached_supply_valid());
+        assert!(matches!(
+            fork.validate_supply_invariants(),
+            Err(LedgerError::CoinSupplyMismatch)
+        ));
+        fork.coin.total_mined = Zeno::ONE;
+        fork.validate_supply_invariants().unwrap();
+        fork.audit_supply_invariants().unwrap();
+        let asset = *fork.extensions.assets.records.keys().next().unwrap();
+        let input = *fork.extensions.assets.shares.keys().next().unwrap();
+        let journal = fork
+            .extensions
+            .assets
+            .apply(
+                &AssetCall::Transfer(Transfer {
+                    asset,
+                    inputs: vec![input],
+                    outputs: vec![AssetOutput::new(owner, Unit::from_units(10))],
+                }),
+                ExecutionContext {
+                    actor: owner,
+                    commitment: [2; 32],
+                },
+            )
+            .unwrap();
+        assert!(!fork.extensions.assets.cached_supply_valid());
+        fork.validate_supply_invariants().unwrap();
+        assert!(fork.extensions.assets.cached_supply_valid());
+        assert!(original.extensions.assets.cached_supply_valid());
+        original.validate_supply_invariants().unwrap();
+        fork.extensions.assets.rollback(journal);
+        assert!(!fork.extensions.assets.cached_supply_valid());
+        fork.audit_supply_invariants().unwrap();
+        assert_eq!(fork.extensions.assets, original.extensions.assets);
+        let restored =
+            crate::ledger::LedgerState::try_from_slice(&borsh::to_vec(&fork).unwrap()).unwrap();
+        assert!(!restored.extensions.assets.cached_supply_valid());
+        restored.audit_supply_invariants().unwrap();
+        std::thread::scope(|scope| {
+            for state in [&original, &fork] {
+                scope.spawn(move || {
+                    for _ in 0..32 {
+                        state.validate_supply_invariants().unwrap();
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn deep_audit_and_snapshot_restore_ignore_even_forged_internal_memo() {
+        use crate::ledger::{Ledger, LedgerError};
+        let mut ledger = crate::genesis::genesis_ledger().unwrap();
+        ledger.state.extensions.assets = supply_fixture().extensions.assets;
+        let asset = *ledger
+            .state
+            .extensions
+            .assets
+            .records
+            .keys()
+            .next()
+            .unwrap();
+        ledger
+            .state
+            .extensions
+            .assets
+            .records
+            .get_mut(&asset)
+            .unwrap()
+            .supply = Unit::from_units(9);
+        // Intentionally forge a kernel-internal memo. Applications and encoded
+        // snapshots have no access to this setter or these private cache fields.
+        ledger
+            .state
+            .extensions
+            .assets
+            .remember_valid_supply(BTreeMap::new());
+        assert!(ledger.state.extensions.assets.cached_supply_valid());
+        assert!(matches!(
+            ledger.state.audit_asset_supply(),
+            Err(LedgerError::AssetSupplyMismatch)
+        ));
+        assert!(matches!(
+            ledger.state.audit_supply_invariants(),
+            Err(LedgerError::AssetSupplyMismatch)
+        ));
+        let blocks: Vec<_> = ledger.chain.blocks().cloned().collect();
+        assert!(matches!(
+            Ledger::from_snapshot(ledger.snapshot(), &blocks),
+            Err(LedgerError::AssetSupplyMismatch)
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual changed-asset supply benchmark; use release mode and --nocapture"]
+    fn benchmark_incremental_changed_asset_supply() {
+        use std::{
+            hint::black_box,
+            time::{Duration, Instant},
+        };
+        let mut state = supply_fixture();
+        let owner = Owner::Program(ProgramId([61; 32]));
+        let asset = *state.extensions.assets.records.keys().next().unwrap();
+        let entries = 100_000u64;
+        let input = *state.extensions.assets.shares.keys().next().unwrap();
+        state.extensions.assets.remove_share(&input);
+        state
+            .extensions
+            .assets
+            .records
+            .get_mut(&asset)
+            .unwrap()
+            .supply = Unit::from_units(entries.into());
+        state
+            .extensions
+            .assets
+            .records
+            .get_mut(&asset)
+            .unwrap()
+            .total_minted = Unit::from_units(entries.into());
+        state
+            .extensions
+            .assets
+            .records
+            .get_mut(&asset)
+            .unwrap()
+            .metadata
+            .max_supply = Unit::from_units(entries.into());
+        for key in 0..entries {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&key.to_le_bytes());
+            state.extensions.assets.put_share(
+                Share::from_bytes(bytes),
+                AssetShare::new(asset, Unit::from_units(1), owner),
+            );
+        }
+        state.audit_supply_invariants().unwrap();
+        let mut input = Share::from_bytes([0; 32]);
+        let rounds = 128u64;
+        let mut full = Duration::ZERO;
+        let mut incremental = Duration::ZERO;
+        let mut apply = Duration::ZERO;
+        for round in 0..rounds {
+            let mut commitment = [9; 32];
+            commitment[..8].copy_from_slice(&round.to_le_bytes());
+            let call = AssetCall::Transfer(Transfer {
+                asset,
+                inputs: vec![input],
+                outputs: vec![AssetOutput::new(owner, Unit::from_units(1))],
+            });
+            let start = Instant::now();
+            state
+                .extensions
+                .assets
+                .apply(
+                    &call,
+                    ExecutionContext {
+                        actor: owner,
+                        commitment,
+                    },
+                )
+                .unwrap();
+            apply += start.elapsed();
+            assert_eq!(
+                state
+                    .extensions
+                    .assets
+                    .supply_snapshot()
+                    .unwrap()
+                    .dirty
+                    .len(),
+                1
+            );
+            let start = Instant::now();
+            black_box(&state).validate_supply_invariants().unwrap();
+            incremental += start.elapsed();
+            let start = Instant::now();
+            black_box(&state).audit_supply_invariants().unwrap();
+            full += start.elapsed();
+            input = Share::derive(asset, commitment, 0);
+        }
+        assert_incremental_totals(&state);
+        let restored =
+            crate::ledger::LedgerState::try_from_slice(&borsh::to_vec(&state).unwrap()).unwrap();
+        assert!(restored.extensions.assets.supply_snapshot().is_none());
+        restored.audit_supply_invariants().unwrap();
+        println!(
+            "shares={entries} changed_asset_checks={rounds} full_audit_ms={:.3} incremental_ms={:.3} tracked_apply_ms={:.3}",
+            full.as_secs_f64() * 1000.0,
+            incremental.as_secs_f64() * 1000.0,
+            apply.as_secs_f64() * 1000.0
+        );
+    }
+
+    #[test]
+    #[ignore = "manual repeated supply-audit benchmark; use release mode and --nocapture"]
+    fn benchmark_unchanged_asset_supply_cache() {
+        use std::{hint::black_box, time::Instant};
+        let mut state = crate::ledger::LedgerState::default();
+        let owner = Owner::Program(ProgramId([62; 32]));
+        let entries = 100_000u64;
+        state
+            .extensions
+            .assets
+            .apply(
+                &AssetCall::Register(Register {
+                    name: "SupplyBench".into(),
+                    max_supply: Unit::from_units(u128::from(entries)),
+                    initial_mint: Unit::from_units(u128::from(entries)),
+                    mint_authority: owner,
+                    nonce: 1,
+                }),
+                ExecutionContext {
+                    actor: owner,
+                    commitment: [1; 32],
+                },
+            )
+            .unwrap();
+        let asset = *state.extensions.assets.records.keys().next().unwrap();
+        let input = *state.extensions.assets.shares.keys().next().unwrap();
+        state.extensions.assets.remove_share(&input);
+        for key in 0..entries {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&key.to_le_bytes());
+            state.extensions.assets.put_share(
+                Share::from_bytes(bytes),
+                AssetShare::new(asset, Unit::from_units(1), owner),
+            );
+        }
+        let before = borsh::to_vec(&state).unwrap();
+        state.validate_supply_invariants().unwrap();
+        let rounds = 128;
+        let start = Instant::now();
+        for _ in 0..rounds {
+            black_box(&state).audit_asset_supply().unwrap();
+        }
+        let full = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..rounds {
+            black_box(&state).validate_supply_invariants().unwrap();
+        }
+        let cached = start.elapsed();
+        assert_eq!(borsh::to_vec(&state).unwrap(), before);
+        state.audit_supply_invariants().unwrap();
+        let input = *state.extensions.assets.shares.keys().next().unwrap();
+        state
+            .extensions
+            .assets
+            .put_share(input, AssetShare::new(asset, Unit::ZERO, owner));
+        assert!(!state.extensions.assets.cached_supply_valid());
+        assert!(matches!(
+            state.validate_supply_invariants(),
+            Err(crate::ledger::LedgerError::InvalidAssetState)
+        ));
+        println!(
+            "asset_shares={entries} unchanged_supply_checks={rounds} full_scan_ms={:.3} validated_roots_ms={:.3}",
+            full.as_secs_f64() * 1000.0,
+            cached.as_secs_f64() * 1000.0
+        );
+    }
+
     // Historical clone-and-diff implementation, retained only as a test oracle.
     fn legacy_apply(
         state: &mut AssetState,
         call: &AssetCall,
         context: ExecutionContext,
     ) -> Result<AssetJournal, AssetError> {
-        let mut next = state.clone();
+        let mut next = AssetState {
+            records: state
+                .records
+                .iter()
+                .map(|(&key, value)| (key, value.clone()))
+                .collect(),
+            shares: state
+                .shares
+                .iter()
+                .map(|(&key, &value)| (key, value))
+                .collect(),
+            by_owner: state
+                .by_owner
+                .iter()
+                .map(|(&owner, assets)| {
+                    (
+                        owner,
+                        assets
+                            .iter()
+                            .map(|(&asset, ids)| (asset, ids.keys().map(|&id| (id, ())).collect()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            supply_cache: SupplyAuditCache::default(),
+        };
         next.apply_monetary_operation(call, context)?;
         let record_keys: BTreeSet<_> = state
             .records
@@ -606,6 +1568,64 @@ mod tests {
         Ok(journal)
     }
 
+    #[test]
+    fn cloned_asset_tables_detach_independently_and_keep_original_and_rollback() {
+        let owner = Owner::Program(ProgramId([51; HASH_SIZE]));
+        let context = |tag| ExecutionContext {
+            actor: owner,
+            commitment: [tag; HASH_SIZE],
+        };
+        let mut original = AssetState::default();
+        original
+            .apply(
+                &AssetCall::Register(Register {
+                    name: "CopyOnWrite".into(),
+                    max_supply: Unit::from_units(100),
+                    initial_mint: Unit::from_units(10),
+                    mint_authority: owner,
+                    nonce: 1,
+                }),
+                context(1),
+            )
+            .unwrap();
+        let encoded = borsh::to_vec(&original).unwrap();
+        let asset = *original.records.keys().next().unwrap();
+        let input = *original.shares.keys().next().unwrap();
+        let mut staged = original.clone();
+        assert!(original.records.shares_root(&staged.records));
+        assert!(original.shares.shares_root(&staged.shares));
+        assert!(original.by_owner.shares_root(&staged.by_owner));
+        let mint = AssetCall::Mint(Mint {
+            asset,
+            nonce: 1,
+            recipient: owner,
+            amount: Unit::from_units(1),
+        });
+        let mut foreign = context(2);
+        foreign.actor = Owner::Program(ProgramId([52; HASH_SIZE]));
+        assert_eq!(staged.apply(&mint, foreign), Err(AssetError::Unauthorized));
+        assert!(original.records.shares_root(&staged.records));
+        assert!(original.shares.shares_root(&staged.shares));
+        assert!(original.by_owner.shares_root(&staged.by_owner));
+        let transfer = AssetCall::Transfer(Transfer {
+            asset,
+            inputs: vec![input],
+            outputs: vec![AssetOutput::new(owner, Unit::from_units(10))],
+        });
+        let journal = staged.apply(&transfer, context(3)).unwrap();
+        assert!(original.records.shares_root(&staged.records));
+        assert!(!original.shares.shares_root(&staged.shares));
+        assert!(!original.by_owner.shares_root(&staged.by_owner));
+        staged.rollback(journal);
+        assert_eq!(staged, original);
+        let journal = staged.apply(&mint, context(4)).unwrap();
+        assert!(!original.records.shares_root(&staged.records));
+        assert_eq!(borsh::to_vec(&original).unwrap(), encoded);
+        staged.rollback(journal);
+        assert_eq!(staged, original);
+        assert_owner_index(&staged);
+    }
+
     fn assert_sparse_matches_full(state: &AssetState, call: &AssetCall, context: ExecutionContext) {
         let before = borsh::to_vec(state).unwrap().len() as i128;
         let mut legacy = state.clone();
@@ -623,6 +1643,65 @@ mod tests {
         let preview = view.apply(call, context).unwrap();
         assert_eq!(preview, journal);
         assert_eq!(preview.canonical_delta(&view).unwrap(), delta);
+    }
+
+    fn assert_owner_index(state: &AssetState) {
+        let mut expected: BTreeMap<Owner, BTreeMap<AssetContract, BTreeSet<Share>>> =
+            BTreeMap::new();
+        for (&id, share) in state.shares.iter() {
+            expected
+                .entry(share.owner)
+                .or_default()
+                .entry(share.asset)
+                .or_default()
+                .insert(id);
+        }
+        let actual: BTreeMap<_, BTreeMap<_, BTreeSet<_>>> = state
+            .by_owner
+            .iter()
+            .map(|(&owner, assets)| {
+                (
+                    owner,
+                    assets
+                        .iter()
+                        .map(|(&asset, ids)| (asset, ids.keys().copied().collect()))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        for (&owner, assets) in &expected {
+            let indexed: BTreeMap<_, _> = state
+                .shares_by_owner(owner)
+                .map(|(id, share)| (id, *share))
+                .collect();
+            let scanned: BTreeMap<_, _> = state
+                .shares
+                .iter()
+                .filter(|(_, share)| share.owner == owner)
+                .map(|(&id, share)| (id, *share))
+                .collect();
+            assert_eq!(indexed, scanned);
+            for &asset in assets.keys() {
+                let indexed: Vec<_> = state
+                    .shares_by_owner_asset(owner, asset)
+                    .map(|(id, share)| (id, *share))
+                    .collect();
+                let scanned: Vec<_> = state
+                    .shares
+                    .iter()
+                    .filter(|(_, share)| share.owner == owner && share.asset == asset)
+                    .map(|(&id, share)| (id, *share))
+                    .collect();
+                assert_eq!(indexed, scanned);
+            }
+        }
+        let encoded = borsh::to_vec(state).unwrap();
+        assert_eq!(
+            encoded,
+            borsh::to_vec(&(&state.records, &state.shares)).unwrap()
+        );
+        assert_eq!(AssetState::try_from_slice(&encoded).unwrap(), *state);
     }
 
     #[test]
@@ -649,7 +1728,7 @@ mod tests {
             commitment: [2; HASH_SIZE],
         };
         let collision = Share::derive(asset, context.commitment, 1);
-        state.shares.insert(
+        state.put_share(
             collision,
             AssetShare::new(asset, Unit::from_units(7), owner),
         );
@@ -680,6 +1759,110 @@ mod tests {
     }
 
     #[test]
+    fn owner_index_separates_assets_and_owners_and_removes_empty_buckets() {
+        let alice = Owner::Program(ProgramId([1; 32]));
+        let bob = Owner::Program(ProgramId([2; 32]));
+        let mut state = AssetState::default();
+        let initial = state.clone();
+        let mut journals = Vec::new();
+        for (owner, name, tag) in [(alice, "A", 1), (bob, "B", 2)] {
+            journals.push(
+                state
+                    .apply(
+                        &AssetCall::Register(Register {
+                            name: name.into(),
+                            max_supply: Unit::from_units(100),
+                            initial_mint: Unit::from_units(10),
+                            mint_authority: owner,
+                            nonce: 1,
+                        }),
+                        ExecutionContext {
+                            actor: owner,
+                            commitment: [tag; 32],
+                        },
+                    )
+                    .unwrap(),
+            );
+            assert_owner_index(&state);
+        }
+        let a = state
+            .records
+            .iter()
+            .find(|(_, r)| r.metadata.creator == alice)
+            .unwrap()
+            .0
+            .to_owned();
+        let b = state
+            .records
+            .iter()
+            .find(|(_, r)| r.metadata.creator == bob)
+            .unwrap()
+            .0
+            .to_owned();
+        journals.push(
+            state
+                .apply(
+                    &AssetCall::Mint(Mint {
+                        asset: b,
+                        recipient: alice,
+                        amount: Unit::from_units(5),
+                        nonce: 1,
+                    }),
+                    ExecutionContext {
+                        actor: bob,
+                        commitment: [3; 32],
+                    },
+                )
+                .unwrap(),
+        );
+        assert_owner_index(&state);
+        assert_eq!(state.shares_by_owner(alice).count(), 2);
+        let input = state.shares_by_owner_asset(alice, a).next().unwrap().0;
+        journals.push(
+            state
+                .apply(
+                    &AssetCall::Transfer(Transfer {
+                        asset: a,
+                        inputs: vec![input],
+                        outputs: vec![AssetOutput::new(bob, Unit::from_units(10))],
+                    }),
+                    ExecutionContext {
+                        actor: alice,
+                        commitment: [4; 32],
+                    },
+                )
+                .unwrap(),
+        );
+        assert_owner_index(&state);
+        assert_eq!(state.shares_by_owner_asset(alice, a).count(), 0);
+        let input = state.shares_by_owner_asset(alice, b).next().unwrap().0;
+        journals.push(
+            state
+                .apply(
+                    &AssetCall::Burn(Burn {
+                        asset: b,
+                        inputs: vec![input],
+                        amount: Unit::from_units(5),
+                        output: Unit::ZERO,
+                    }),
+                    ExecutionContext {
+                        actor: alice,
+                        commitment: [5; 32],
+                    },
+                )
+                .unwrap(),
+        );
+        assert_owner_index(&state);
+        assert!(!state.by_owner.contains_key(&alice));
+        assert_eq!(state.shares_by_owner(alice).count(), 0);
+        for journal in journals.into_iter().rev() {
+            state.rollback(journal);
+            assert_owner_index(&state);
+        }
+        assert_eq!(state, initial);
+    }
+
+    #[test]
     #[ignore = "manual clone microbenchmark; use release mode and --nocapture"]
     fn benchmark_asset_clone_and_sparse_journal() {
         use std::{hint::black_box, time::Instant};
@@ -702,7 +1885,7 @@ mod tests {
         .unwrap();
         let asset = *base.records.keys().next().unwrap();
         for index in 0..20_000 {
-            base.shares.insert(
+            base.put_share(
                 Share::derive(asset, [7; HASH_SIZE], index),
                 AssetShare::new(asset, Unit::from_units(1), owner),
             );
@@ -1157,6 +2340,7 @@ mod tests {
                     state.records[&asset].total_burned.as_units(),
                     u128::from(burned)
                 );
+                assert_owner_index(&state);
 
                 let mut ledger = crate::ledger::LedgerState::default();
 
@@ -1171,6 +2355,7 @@ mod tests {
                 let encoded = borsh::to_vec(&journal).unwrap();
 
                 state.rollback(AssetJournal::try_from_slice(&encoded).unwrap());
+                assert_owner_index(&state);
 
                 assert_eq!(state, before);
             }

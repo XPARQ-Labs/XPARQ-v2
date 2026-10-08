@@ -90,7 +90,7 @@ or `program-mint`. Inspect balances using `program-account --program-id HEX_ID`
 or `GET /program/account/HEX_ID`. See the [fixed payout example](../examples/vault/README.md).
 
 CoinOutput's Borsh recipient uses a tagged Program owner,
-coin state-weight accounting, and chain-spec 6/schema 14 compatibility.
+coin state-weight accounting, and chain-spec 8/schema 16 compatibility.
 Old serialized transactions and databases must not be reused with this format.
 Use a fresh development data directory; there is no database migration here.
 All peers must run the matching protocol version.
@@ -218,7 +218,7 @@ still binds the mint authority and asset ownership to the executing program.
 
 ### Authenticated frames and atomic effects
 
-At the root, caller is `Owner::Program(ProgramId::account(signer))`. In A → B, B's caller is
+At the root, caller is `Owner::Program(signer)`, the authenticated signature-policy account. In A → B, B's caller is
 `Owner::Program(A)`; signer remains the original authenticated ProgramId. Calldata
 can contain an Owner, but cannot replace the caller. Programs must explicitly
 compare caller against their own controller or permission state. Deployment
@@ -294,7 +294,8 @@ all input bytes and payment outputs. `/program/quote` additionally returns
 `vm_return_value` as a decimal string (null for non-VM calls); this is a preview,
 not a committed transaction receipt.
 
-This extension updates chain-spec version to 6 and database schema to 14. Bytecode
+The current protocol uses chain-spec version 8 and database schema 16. Coin and
+asset share IDs are full 32-byte hashes. Bytecode
 versions 1–4 remain supported with the current program-only Owner encoding, but databases committed to
 an older chain identity are rejected. No migration of an existing chain is included.
 

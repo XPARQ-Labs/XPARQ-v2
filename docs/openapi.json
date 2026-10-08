@@ -76,7 +76,7 @@
     },
     "/program/deploy/quote": {
       "post": {
-        "summary": "Quote the next-block deploy burn and authorization commitment before signing",
+        "summary": "Quote the next-block deploy burn and authorization commitment before signing (chain-spec 8 salted authorization)",
         "requestBody": {
           "required": true,
           "content": {
@@ -139,7 +139,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
+              "pattern": "^[0-9a-f]{64}$"
             }
           }
         ],
@@ -205,7 +205,7 @@
             "description": "Invalid Program quote request"
           }
         },
-        "description": "Verifies envelope authorization and previews asset/program storage growth, shared VM fuel, and contract-owned monetary effects. VM quotes check payment input ownership/conservation and contract balances; exact wallet payment burn is not checked."
+        "description": "Verifies chain-spec 8 envelope authorization (32-byte salt, public key, signature) and previews asset/program storage growth, shared VM fuel, and contract-owned monetary effects. VM quotes check payment input ownership/conservation and contract balances; exact wallet payment burn is not checked."
       }
     },
     "/program/asset/{asset}": {

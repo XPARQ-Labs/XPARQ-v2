@@ -57,7 +57,7 @@ fn fund(state: &mut LedgerState, owner: Owner, n: u64, tag: u8) {
     state
         .utxos
         .insert_coin(
-            CoinShare::from_bytes([tag; 16]),
+            CoinShare::from_bytes([tag; 32]),
             crate::ledger::CoinUtxo {
                 owner,
                 amount: Zeno::from_zeno(n),
@@ -123,6 +123,7 @@ fn signed(
             call: call.clone(),
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },
@@ -213,6 +214,7 @@ fn dummy(
         call,
         payment,
         authorization: AccountAuthorization {
+            salt: [0; 32],
             public_key: seed.public_key(),
             signature: seed.sign(commitment.as_bytes()),
         },
@@ -662,6 +664,58 @@ fn value_calls_credit_only_actual_transfer_and_bound_depth_and_call_count() {
 }
 
 #[test]
+fn indexed_accounts_include_existing_and_new_coins_when_loaded_before_or_after_transfer() {
+    for preload in [false, true] {
+        let (mut state, seed, chain) = fixture();
+        let child = deploy(&mut state, &seed, vec![0x47, 3], 1);
+        let mut parent = Vec::new();
+        if preload {
+            owner(&mut parent, Owner::Program(child));
+            bytes(&mut parent, &[]);
+            parent.extend([0x43, 0x17]);
+        }
+        owner(&mut parent, Owner::Program(child));
+        bytes(&mut parent, &[]);
+        int(&mut parent, 17);
+        parent.extend([0x48, 3]);
+        let parent = deploy(&mut state, &seed, parent, 2);
+        fund(&mut state, Owner::Program(child), 7, 3);
+        fund(&mut state, Owner::Program(parent), 17, 4);
+        let before = state.clone();
+        let tx = signed(&state, &seed, chain, call(parent, &[]), 0);
+        let commitment =
+            program_invocation_commitment(tx.signer, &tx.call, &tx.payment, chain).unwrap();
+        let result = preview(
+            &state,
+            &tx,
+            2,
+            commitment,
+            super::super::application::Applications::default().executor(),
+        )
+        .unwrap();
+        assert_eq!(result.value, 24);
+        assert_eq!(state, before);
+        let journal = state
+            .apply_program_call(tx, ProgramId::ZERO, chain, 2)
+            .unwrap();
+        assert_eq!(
+            state
+                .utxos
+                .coins_by_owner(Owner::Program(child))
+                .map(|(_, coin)| coin.amount.as_zeno())
+                .sum::<u64>(),
+            24
+        );
+        assert_eq!(
+            state.utxos.coins_by_owner(Owner::Program(parent)).count(),
+            0
+        );
+        state.rollback_state(journal).unwrap();
+        assert_eq!(state, before);
+    }
+}
+
+#[test]
 fn application_state_survives_block_replay_snapshot_and_reorg() {
     use crate::{
         block::{Block, Emission},
@@ -716,6 +770,7 @@ fn application_state_survives_block_replay_snapshot_and_reorg() {
         )
         .unwrap(),
         authorization: AccountAuthorization {
+            salt: [0; 32],
             public_key: seed.public_key(),
             signature: seed.sign(b"draft"),
         },

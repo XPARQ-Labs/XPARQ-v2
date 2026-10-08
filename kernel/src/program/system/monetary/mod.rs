@@ -125,7 +125,7 @@ mod tests {
     fn one_route_decodes_all_operations_and_rejects_ambiguous_or_unsupported_calls() {
         let owner = Owner::Program(ProgramId::from_bytes([7; 32]));
         let asset = AssetContract::from_bytes([8; 32]);
-        let share = Share::from_bytes([9; 16]);
+        let share = Share::from_bytes([9; 32]);
         let calls = [
             asset_call(
                 AssetOpcode::Register,

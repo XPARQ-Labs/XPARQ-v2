@@ -21,7 +21,9 @@ canonical cache publication. Snapshot state and chain commitments are unchanged.
 Compact snapshots now accept a contiguous suffix of rollback journals ending at
 the snapshot tip. Each retained block must have exactly the expected journals;
 holes, unrelated keys and empty coverage are rejected. Old full-journal snapshots
-remain readable. Snapshot version 3 and storage schema version 10 are unchanged.
+remain readable within the same chain identity. Journal pruning does not change
+snapshot version 3 or storage encoding. The current database schema is 16;
+older chain schemas are rejected.
 Older clients that require full journal coverage fall back to genesis replay when
 they encounter a pruned snapshot. Wallet and block formats are unchanged.
 

@@ -197,7 +197,7 @@ mod tests {
         );
         transfer.truncate(crypto::HASH_SIZE);
         transfer.extend_from_slice(&1_u32.to_le_bytes());
-        transfer.extend_from_slice(&[0; crypto::HASH16_SIZE]);
+        transfer.extend_from_slice(&[0; crypto::HASH_SIZE]);
         transfer.extend_from_slice(&((MAX_ASSET_OUTPUTS + 1) as u32).to_le_bytes());
         assert_eq!(
             decode(AssetOpcode::Transfer as u8, &transfer),
@@ -208,12 +208,15 @@ mod tests {
     #[test]
     fn rejects_zero_output_and_duplicate_inputs() {
         let asset = asset::AssetContract::from_bytes([1; crypto::HASH_SIZE]);
-        let share = asset::Share::from_bytes([2; crypto::HASH16_SIZE]);
+        let share = asset::Share::from_bytes([2; crypto::HASH_SIZE]);
         let recipient = crypto::ProgramId::from_bytes([3; crypto::PROGRAM_ID_SIZE]);
         let transfer = Transfer {
             asset,
             inputs: vec![share],
-            outputs: vec![asset::AssetOutput::new(crate::common::Owner::Program(recipient), asset::Unit::ZERO)],
+            outputs: vec![asset::AssetOutput::new(
+                crate::common::Owner::Program(recipient),
+                asset::Unit::ZERO,
+            )],
         };
         assert_eq!(
             decode(

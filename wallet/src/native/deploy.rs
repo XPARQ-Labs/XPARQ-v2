@@ -1,7 +1,7 @@
 use super::rpc::fetch_account;
 use super::*;
 use kernel::{
-    operation::{AuthorizedDeployProgram, BlockOperation},
+    operation::{AuthorizedDeployProgram, BlockOperation, BlockOperationRef},
     program::DeployProgram,
 };
 
@@ -99,7 +99,10 @@ fn quote_selected(
         let outputs = if change == 0 {
             vec![]
         } else {
-            vec![CoinOutput::new(wallet.program_id(), Zeno::from_zeno(change))]
+            vec![CoinOutput::new(
+                wallet.program_id(),
+                Zeno::from_zeno(change),
+            )]
         };
         let payment = CoinTransition::coin_with_charges(
             wallet.program_id(),
@@ -122,15 +125,11 @@ fn quote_selected(
         let required_burn = quote["required_protocol_burn"]
             .as_u64()
             .ok_or("node returned invalid deploy burn")?;
-        let operation = BlockOperation::DeployProgram(Box::new(signed.clone()));
-        let required_fee = u64::try_from(
-            canonical_bytes(&operation)
+        let required_fee =
+            kernel::crypto::canonical_length(&BlockOperationRef::DeployProgram(&signed))
                 .map_err(|e| e.to_string())?
-                .len(),
-        )
-        .ok()
-        .and_then(|size| size.checked_mul(AUTOMATIC_FEE_ZENO_PER_BYTE))
-        .ok_or("deploy miner fee overflow")?;
+                .checked_mul(AUTOMATIC_FEE_ZENO_PER_BYTE)
+                .ok_or("deploy miner fee overflow")?;
         if required_burn == burn && required_fee == fee {
             let commitment = signed
                 .commitment(kernel::genesis::chain_context().map_err(|e| e.to_string())?)
@@ -171,12 +170,21 @@ mod tests {
         };
         let payment = CoinTransition::coin_with_charges(
             wallet.program_id,
-            vec![CoinShare::from_bytes([3; kernel::crypto::HASH16_SIZE])],
+            vec![CoinShare::from_bytes([3; kernel::crypto::HASH_SIZE])],
             vec![CoinOutput::new(wallet.program_id, Zeno::from_zeno(90))],
             CoinCharges::new(Zeno::from_zeno(10)),
         )
         .unwrap();
         let mut signed = wallet.sign_deploy_program(program, payment).unwrap();
+        let counted =
+            kernel::crypto::canonical_length(&BlockOperationRef::DeployProgram(&signed)).unwrap();
+        let historical = canonical_bytes(&BlockOperation::DeployProgram(Box::new(signed.clone())))
+            .unwrap()
+            .len() as u64;
+        assert_eq!(
+            counted * AUTOMATIC_FEE_ZENO_PER_BYTE,
+            historical * AUTOMATIC_FEE_ZENO_PER_BYTE
+        );
         let chain = kernel::genesis::chain_context().unwrap();
         let commitment = signed.commitment(chain).unwrap();
         assert!(

@@ -1714,6 +1714,7 @@ fn deploy_operation_is_mined_persisted_and_replayed() {
             deploy: deploy.clone(),
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(&[0; kernel::crypto::HASH_SIZE]),
             },

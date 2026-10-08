@@ -67,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 6;
+pub const CHAIN_SPEC_VERSION: u32 = 8;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -189,10 +189,10 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         // Native protocol identity
         native_coin_contract: CoinContract::derive().into_bytes(),
         extension_asset_program: "xparq-unified-monetary-program-v1",
-        transaction_format: "program-id-principal-payment-and-monetary-v2",
-        ownership_model: "program-only-tag0-signature-policy-domain-key-hash-v2",
+        transaction_format: "program-id-salted-signature-proof-payment-and-monetary-v3",
+        ownership_model: "program-only-tag0-signature-policy-v2-scheme-key-salt32-v3",
         monetary_call_format: "route0-transfer1-create2-mint3-burn4-currency0coin1asset-denycoinburn-legacyassetroute1",
-        application_state_format: "program-owned-coin-asset-and-versioned-program-kv-state-v4",
+        application_state_format: "program-owned-coin-asset-share32-and-versioned-program-kv-state-v5",
         vm_bytecode_format: "xpvm-v1-v2-v3-v4-typed-applications-metered-calls-v1",
         max_vm_code_size: crate::program::MAX_PROGRAM_CODE_SIZE as u64,
         max_vm_stack_items: crate::program::vm::MAX_STACK_ITEMS,
@@ -234,12 +234,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 6);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 8);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                125, 174, 223, 82, 40, 139, 129, 209, 167, 89, 59, 232, 78, 150, 165, 169, 229,
-                147, 30, 144, 196, 183, 169, 4, 114, 53, 122, 228, 62, 25, 244, 217
+                44, 186, 1, 169, 74, 205, 250, 30, 135, 3, 165, 27, 206, 47, 193, 73, 208, 132, 94,
+                170, 210, 206, 135, 31, 71, 231, 51, 170, 49, 100, 190, 66
             ]
         );
     }

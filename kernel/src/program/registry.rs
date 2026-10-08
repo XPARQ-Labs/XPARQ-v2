@@ -5,7 +5,7 @@ use std::sync::Arc;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{HASH_SIZE, HashDomain, canonical_bytes, domain};
 
-use crate::common::Height;
+use crate::{common::Height, state_map::StateMap};
 
 pub use crypto::ProgramId;
 
@@ -45,7 +45,9 @@ pub struct ProgramRecord {
     pub nonce: u64,
     pub deployed_at: Height,
     pub state_value: i64,
-    pub storage: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Shared between staged states; writes detach only this program's storage.
+    /// Canonical encoding remains the historical BTreeMap encoding.
+    pub storage: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl BorshSerialize for ProgramRecord {
@@ -76,9 +78,9 @@ impl BorshDeserialize for ProgramRecord {
             deployed_at: Height::deserialize_reader(reader)?,
             state_value: i64::deserialize_reader(reader)?,
             storage: if version == Some(super::vm::APPLICATION_VERSION) {
-                super::vm_app::read_storage(reader)?
+                super::vm_app::read_storage(reader)?.into()
             } else {
-                BTreeMap::new()
+                Arc::default()
             },
         })
     }
@@ -86,10 +88,10 @@ impl BorshDeserialize for ProgramRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize)]
 pub struct ProgramRegistry {
-    programs: BTreeMap<ProgramId, ProgramRecord>,
+    programs: StateMap<ProgramId, ProgramRecord>,
     // Derived lookup data must never affect canonical state bytes.
     #[borsh(skip)]
-    deployments: BTreeSet<(ProgramId, u64)>,
+    deployments: StateMap<(ProgramId, u64), ()>,
 }
 
 impl BorshDeserialize for ProgramRegistry {
@@ -119,6 +121,14 @@ impl BorshDeserialize for ProgramRegistry {
 }
 
 impl ProgramRegistry {
+    pub(crate) fn same_canonical_view(&self, other: &Self) -> bool {
+        let Self {
+            programs,
+            deployments: _,
+        } = self;
+        programs.shares_root(&other.programs)
+    }
+
     pub fn program(&self, id: &ProgramId) -> Option<&ProgramRecord> {
         self.programs.get(id)
     }
@@ -133,7 +143,7 @@ impl ProgramRegistry {
         record: ProgramRecord,
     ) -> Result<(), RegistryError> {
         self.check_available(id, record.owner, record.nonce)?;
-        self.deployments.insert((record.owner, record.nonce));
+        self.deployments.insert((record.owner, record.nonce), ());
         self.programs.insert(id, record);
         Ok(())
     }
@@ -150,7 +160,7 @@ impl ProgramRegistry {
         owner: ProgramId,
         nonce: u64,
     ) -> Result<(), RegistryError> {
-        if self.contains(&id) || self.deployments.contains(&(owner, nonce)) {
+        if self.contains(&id) || self.deployments.contains_key(&(owner, nonce)) {
             return Err(RegistryError::AlreadyExists);
         }
         Ok(())
@@ -186,7 +196,7 @@ impl ProgramRegistry {
                 return Err(RegistryError::InvalidRecord);
             }
         }
-        if deployments != self.deployments {
+        if !deployments.iter().eq(self.deployments.keys()) {
             return Err(RegistryError::InvalidRecord);
         }
         Ok(())
@@ -206,24 +216,28 @@ impl ProgramRegistry {
         key: Vec<u8>,
         value: Option<Vec<u8>>,
     ) -> Result<(), RegistryError> {
-        let record = self
-            .programs
-            .get_mut(&id)
-            .ok_or(RegistryError::InvalidRecord)?;
+        let record = self.programs.get(&id).ok_or(RegistryError::InvalidRecord)?;
+        if record.storage.get(&key) == value.as_ref() {
+            return Ok(());
+        }
+        let record = self.programs.get_mut(&id).unwrap();
         match value {
             Some(value) => {
-                record.storage.insert(key, value);
+                Arc::make_mut(&mut record.storage).insert(key, value);
             }
             None => {
-                record.storage.remove(&key);
+                Arc::make_mut(&mut record.storage).remove(&key);
             }
         }
         Ok(())
     }
 
     pub(crate) fn set_state(&mut self, id: ProgramId, value: i64) -> Option<i64> {
-        let record = self.programs.get_mut(&id)?;
-        Some(std::mem::replace(&mut record.state_value, value))
+        let previous = self.programs.get(&id)?.state_value;
+        if previous != value {
+            self.programs.get_mut(&id).unwrap().state_value = value;
+        }
+        Some(previous)
     }
 }
 
@@ -238,6 +252,71 @@ pub enum RegistryError {
 mod tests {
     use super::*;
     use crate::program::{DeployProgram, deploy_program, rollback_program};
+
+    #[test]
+    fn staged_storage_detaches_only_changed_program_and_preserves_encoding() {
+        let mut original = ProgramRegistry::default();
+        let mut application = deployment(201);
+        let mut code = b"XPVM".to_vec();
+        code.extend([4, 16, 0, 1, 0, 0, 0, 0, 0]);
+        code.push(1);
+        code.extend(0u128.to_le_bytes());
+        code.push(3);
+        application.code = code.into();
+        let (first, _) = deploy_program(&mut original, application.clone(), Height(3)).unwrap();
+        application.nonce += 1;
+        let (second, _) = deploy_program(&mut original, application, Height(3)).unwrap();
+        original
+            .set_storage(first, b"key".to_vec(), Some(vec![7; 4096]))
+            .unwrap();
+        original
+            .set_storage(second, b"other".to_vec(), Some(vec![8; 4096]))
+            .unwrap();
+        let bytes = canonical_bytes(&original).unwrap();
+        let record = original.program(&first).unwrap();
+        let historical = canonical_bytes(&(
+            record.code_hash,
+            record.code.as_ref(),
+            record.owner,
+            record.nonce,
+            record.deployed_at,
+            record.state_value,
+            record.storage.as_ref(),
+        ))
+        .unwrap();
+        assert_eq!(canonical_bytes(record).unwrap(), historical);
+        assert_eq!(ProgramRegistry::try_from_slice(&bytes).unwrap(), original);
+
+        let mut staged = original.clone();
+        assert!(Arc::ptr_eq(
+            &original.program(&first).unwrap().storage,
+            &staged.program(&first).unwrap().storage
+        ));
+        staged
+            .set_storage(first, b"key".to_vec(), Some(vec![7; 4096]))
+            .unwrap();
+        staged
+            .set_storage(first, b"missing".to_vec(), None)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &original.program(&first).unwrap().storage,
+            &staged.program(&first).unwrap().storage
+        ));
+        staged
+            .set_storage(first, b"key".to_vec(), Some(vec![9; 4096]))
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &original.program(&first).unwrap().storage,
+            &staged.program(&first).unwrap().storage
+        ));
+        assert!(Arc::ptr_eq(
+            &original.program(&second).unwrap().storage,
+            &staged.program(&second).unwrap().storage
+        ));
+        staged.set_storage(first, b"key".to_vec(), None).unwrap();
+        assert!(staged.program(&first).unwrap().storage.is_empty());
+        assert_eq!(canonical_bytes(&original).unwrap(), bytes);
+    }
 
     fn deployment(nonce: u64) -> DeployProgram {
         let mut code = b"XPVM".to_vec();

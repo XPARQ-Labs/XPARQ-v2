@@ -9,7 +9,9 @@ use std::{
 };
 
 use kernel::{
-    crypto::{Signature, SigningSeed, program_id_from_public_key, program_id_to_string, canonical_bytes},
+    crypto::{
+        Signature, SigningSeed, canonical_bytes, program_id_from_public_key, program_id_to_string,
+    },
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     program::{AuthorizedProgramEnvelope, CoinTransition, ProgramEnvelope as Transaction},
 };
@@ -59,7 +61,11 @@ fn sender_wallet() -> AccountWallet {
 fn mine(database: &Path, blocks: u64) {
     for _ in 0..blocks {
         let status = Command::new(node_binary())
-            .args(["mine-block", database.to_str().unwrap(), &miner_program_id()])
+            .args([
+                "mine-block",
+                database.to_str().unwrap(),
+                &miner_program_id(),
+            ])
             .stdout(Stdio::null())
             .status()
             .unwrap();
@@ -521,6 +527,7 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
             call: call.clone(),
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: keys.public_key(),
                 signature: keys.sign(commitment.as_bytes()),
             },

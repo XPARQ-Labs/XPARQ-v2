@@ -160,9 +160,18 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                     asset,
                     inputs,
                     outputs: vec![
-                        AssetOutput::new(kernel::common::Owner::Program(owner.program_id), Unit::from_units(20)),
-                        AssetOutput::new(kernel::common::Owner::Program(owner.program_id), Unit::from_units(25)),
-                        AssetOutput::new(kernel::common::Owner::Program(recipient), Unit::from_units(15)),
+                        AssetOutput::new(
+                            kernel::common::Owner::Program(owner.program_id),
+                            Unit::from_units(20),
+                        ),
+                        AssetOutput::new(
+                            kernel::common::Owner::Program(owner.program_id),
+                            Unit::from_units(25),
+                        ),
+                        AssetOutput::new(
+                            kernel::common::Owner::Program(recipient),
+                            Unit::from_units(15),
+                        ),
                     ],
                 }),
                 3 => AssetCall::Burn(Burn {
@@ -183,7 +192,10 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
                     AssetCall::Transfer(Transfer {
                         asset,
                         inputs,
-                        outputs: vec![AssetOutput::new(kernel::common::Owner::Program(owner.program_id), Unit::from_units(40))],
+                        outputs: vec![AssetOutput::new(
+                            kernel::common::Owner::Program(owner.program_id),
+                            Unit::from_units(40),
+                        )],
                     })
                 }
                 _ => unreachable!(),

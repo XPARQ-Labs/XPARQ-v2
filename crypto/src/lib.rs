@@ -14,7 +14,7 @@ pub use agility::*;
 pub use argon2::*;
 pub use codec::{
     CANONICAL_ENCODING_PROFILE, CodecError, canonical_bytes, canonical_decode,
-    canonical_deserialize,
+    canonical_deserialize, canonical_fixed_map_length, canonical_length,
 };
 pub use error::CryptoError;
 pub use hash::*;

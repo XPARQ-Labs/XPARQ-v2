@@ -81,6 +81,7 @@ const INTENT_KIND_PROGRAM_CALL: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AccountAuthorization {
+    pub salt: crypto::AccountSalt,
     pub public_key: PublicKey,
     pub signature: AccountSignature,
 }
@@ -247,6 +248,7 @@ mod program_transaction_tests {
         let sender = program_id_from_public_key(&public_key).unwrap();
         let commitment = AuthorizationCommitment::from_bytes([8; HASH_SIZE]);
         let mut authorization = AccountAuthorization {
+            salt: [0; 32],
             public_key,
             signature: seed.sign(commitment.as_bytes()),
         };
@@ -274,7 +276,7 @@ mod program_transaction_tests {
         };
         let payment = CoinTransition::coin(
             signer,
-            vec![CoinShare::from_bytes([1; crypto::HASH16_SIZE])],
+            vec![CoinShare::from_bytes([1; crypto::HASH_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
         )
         .unwrap();
@@ -284,6 +286,7 @@ mod program_transaction_tests {
             call,
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },

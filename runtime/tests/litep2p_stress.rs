@@ -57,7 +57,10 @@ fn build_fixture(path: &Path, deployments: u64) -> Fixture {
                 .state()
                 .utxos()
                 .coins()
-                .find(|(_, coin)| coin.owner == kernel::common::Owner::Program(owner) && coin.amount.as_zeno() > 50_000_000)
+                .find(|(_, coin)| {
+                    coin.owner == kernel::common::Owner::Program(owner)
+                        && coin.amount.as_zeno() > 50_000_000
+                })
                 .expect("fixture deployment funding");
             let amount = coin.amount.as_zeno();
             // A valid straight-line XPVM program, with nops before const/return.
@@ -89,6 +92,7 @@ fn build_fixture(path: &Path, deployments: u64) -> Fixture {
                     deploy: deploy.clone(),
                     payment,
                     authorization: AccountAuthorization {
+                        salt: [0; 32],
                         public_key: seed.public_key(),
                         signature: seed.sign(&[0; kernel::crypto::HASH_SIZE]),
                     },

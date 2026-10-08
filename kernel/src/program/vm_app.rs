@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use borsh::BorshDeserialize;
-use crypto::{ canonical_bytes};
+use crypto::canonical_bytes;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
@@ -237,7 +237,7 @@ struct Engine<'a> {
     calls: usize,
     actions: usize,
     active: Vec<ProgramId>,
-    accounts_ready: bool,
+    accounts_ready: BTreeSet<ProgramId>,
     // Per-invocation lookup cache, rebuilt from canonical state. Never serialized.
     coins: BTreeMap<ProgramId, (u64, BTreeSet<(Reverse<u64>, CoinShare)>)>,
     assets: BTreeMap<
@@ -254,33 +254,32 @@ struct Engine<'a> {
     storage: BTreeMap<(ProgramId, Vec<u8>), Option<Vec<u8>>>,
 }
 impl Engine<'_> {
-    fn ensure_accounts(&mut self) -> Result<(), ExecutionError> {
-        if self.accounts_ready {
+    fn ensure_accounts(&mut self, id: ProgramId) -> Result<(), ExecutionError> {
+        if self.accounts_ready.contains(&id) {
             return Ok(());
         }
-        for (share, value) in self.state.utxos.coins() {
-            if self.state.programs.contains(&value.owner.program()) {
-                let id = value.owner.program();
-                let account = self.coins.entry(id).or_default();
-                account.0 = account
-                    .0
-                    .checked_add(value.amount.as_zeno())
-                    .ok_or(ExecutionError::ArithmeticOverflow)?;
-                account.1.insert((Reverse(value.amount.as_zeno()), share));
-            }
+        for (share, value) in self.state.utxos.coins_by_owner(Owner::Program(id)) {
+            let account = self.coins.entry(id).or_default();
+            account.0 = account
+                .0
+                .checked_add(value.amount.as_zeno())
+                .ok_or(ExecutionError::ArithmeticOverflow)?;
+            account.1.insert((Reverse(value.amount.as_zeno()), share));
         }
-        for (share, value) in self.state.extensions.assets.shares() {
-            if self.state.programs.contains(&value.owner.program()) {
-                let id = value.owner.program();
-                let account = self.assets.entry((id, value.asset)).or_default();
-                account.0 = account
-                    .0
-                    .checked_add(value.amount.as_units())
-                    .ok_or(ExecutionError::ArithmeticOverflow)?;
-                account.1.insert((Reverse(value.amount.as_units()), *share));
-            }
+        for (share, value) in self
+            .state
+            .extensions
+            .assets
+            .shares_by_owner(Owner::Program(id))
+        {
+            let account = self.assets.entry((id, value.asset)).or_default();
+            account.0 = account
+                .0
+                .checked_add(value.amount.as_units())
+                .ok_or(ExecutionError::ArithmeticOverflow)?;
+            account.1.insert((Reverse(value.amount.as_units()), share));
         }
-        self.accounts_ready = true;
+        self.accounts_ready.insert(id);
         Ok(())
     }
     fn charge(&mut self, n: u64) -> Result<(), ExecutionError> {
@@ -298,7 +297,7 @@ impl Engine<'_> {
     fn merge_asset(&mut self, journal: AssetJournal) -> Result<(), ExecutionError> {
         for (share, previous) in journal.share_changes() {
             if let Some(value) = previous {
-                if self.state.programs.contains(&value.owner.program()) {
+                if self.accounts_ready.contains(&value.owner.program()) {
                     let id = value.owner.program();
                     let account = self.assets.entry((id, value.asset)).or_default();
                     account.0 = account
@@ -309,7 +308,7 @@ impl Engine<'_> {
                 }
             }
             if let Some(value) = self.state.extensions.assets.shares().get(&share) {
-                if self.state.programs.contains(&value.owner.program()) {
+                if self.accounts_ready.contains(&value.owner.program()) {
                     let id = value.owner.program();
                     let account = self.assets.entry((id, value.asset)).or_default();
                     account.0 = account
@@ -332,7 +331,7 @@ impl Engine<'_> {
         result: &vm::ExecutionResult,
         legacy_root: bool,
     ) -> Result<(), ExecutionError> {
-        self.ensure_accounts()?;
+        self.ensure_accounts(id)?;
         let mut selected = Vec::new();
         if let Some(request) = result.coin_transfer {
             let mut total = 0u64;
@@ -341,8 +340,7 @@ impl Engine<'_> {
             let candidates = if legacy_root {
                 self.state
                     .utxos
-                    .coins()
-                    .filter(|(_, v)| v.owner == Owner::Program(id))
+                    .coins_by_owner(Owner::Program(id))
                     .take(super::vm_transfer::MAX_TRANSFER_INPUTS)
                     .map(|(share, _)| share)
                     .collect::<Vec<_>>()
@@ -396,7 +394,7 @@ impl Engine<'_> {
         )
         .map_err(|_| ExecutionError::SettlementFailed)?;
         for (share, value) in coin.consumed_coins {
-            if self.state.programs.contains(&value.owner.program()) {
+            if self.accounts_ready.contains(&value.owner.program()) {
                 let id = value.owner.program();
                 let account = self.coins.entry(id).or_default();
                 account.0 = account
@@ -415,7 +413,7 @@ impl Engine<'_> {
                 .utxos
                 .coin(&share)
                 .ok_or(ExecutionError::SettlementFailed)?;
-            if self.state.programs.contains(&value.owner.program()) {
+            if self.accounts_ready.contains(&value.owner.program()) {
                 let id = value.owner.program();
                 let account = self.coins.entry(id).or_default();
                 account.0 = account
@@ -438,7 +436,7 @@ impl Engine<'_> {
         recipient: Owner,
         amount: u128,
     ) -> Result<(), ExecutionError> {
-        self.ensure_accounts()?;
+        self.ensure_accounts(id)?;
         if amount == 0 {
             return Err(ExecutionError::InvalidOperand);
         }
@@ -505,7 +503,7 @@ impl Engine<'_> {
         asset: AssetContract,
         amount: u128,
     ) -> Result<(), ExecutionError> {
-        self.ensure_accounts()?;
+        self.ensure_accounts(id)?;
         if amount == 0 {
             return Err(ExecutionError::InvalidOperand);
         }
@@ -871,12 +869,12 @@ impl Engine<'_> {
                     ));
                 }
                 0x46 => {
-                    self.ensure_accounts()?;
+                    self.ensure_accounts(id)?;
                     let asset = asset_id(pop(&mut stack)?.bytes()?)?;
                     stack.push(Value::Int(self.assets.get(&(id, asset)).map_or(0, |v| v.0)));
                 }
                 0x47 => {
-                    self.ensure_accounts()?;
+                    self.ensure_accounts(id)?;
                     stack.push(Value::Int(u128::from(
                         self.coins.get(&id).map_or(0, |v| v.0),
                     )));
@@ -1026,7 +1024,7 @@ pub(crate) fn apply(
         calls: 0,
         actions: 0,
         active: Vec::new(),
-        accounts_ready: false,
+        accounts_ready: BTreeSet::new(),
         coins: BTreeMap::new(),
         assets: BTreeMap::new(),
         consumed: BTreeMap::new(),

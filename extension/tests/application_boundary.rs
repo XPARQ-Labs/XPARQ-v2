@@ -2,8 +2,8 @@ use kernel::{
     common::{ChainContext, Owner},
     consensus::{ProtocolBurn, StateTransitionWeight},
     crypto::{
-        AccountSignatureScheme, ProgramId, SigningSeed, program_id_from_public_key, canonical_bytes,
-        canonical_decode,
+        AccountSignatureScheme, ProgramId, SigningSeed, canonical_bytes, canonical_decode,
+        program_id_from_public_key,
     },
     ledger::{CoinUtxo, LedgerState, StateError},
     monetary::coin::{CoinOutput, CoinShare, Zeno},
@@ -32,8 +32,11 @@ fn funded() -> LedgerState {
     let owner = program_id_from_public_key(&seed().public_key()).unwrap();
     let amount = Zeno::from_zeno(10_000_000);
     let coins = std::collections::BTreeMap::from([(
-        CoinShare::from_bytes([1; 16]),
-        CoinUtxo { owner: kernel::common::Owner::Program(owner), amount },
+        CoinShare::from_bytes([1; 32]),
+        CoinUtxo {
+            owner: kernel::common::Owner::Program(owner),
+            amount,
+        },
     )]);
     LedgerState {
         utxos: canonical_decode(&canonical_bytes(&(coins, amount)).unwrap()).unwrap(),
@@ -72,6 +75,7 @@ fn invocation(state: &LedgerState, call: ProgramCall) -> AuthorizedProgramInvoca
             call: call.clone(),
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },
@@ -241,7 +245,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
     changed.payment.inputs.push(changed.payment.inputs[0]);
     variants.push((changed, chain));
     let mut changed = tx.clone();
-    changed.payment.inputs[0] = CoinShare::from_bytes([9; 16]);
+    changed.payment.inputs[0] = CoinShare::from_bytes([9; 32]);
     variants.push((changed, chain));
     let mut changed = tx.clone();
     changed.payment.outputs[0].amount = Zeno::ZERO;
@@ -268,6 +272,7 @@ fn tampered_authorizations_and_payments_leave_the_complete_state_unchanged() {
         program_invocation_commitment(changed.signer, &changed.call, &changed.payment, chain)
             .unwrap();
     changed.authorization = AccountAuthorization {
+        salt: [0; 32],
         public_key: attacker.public_key(),
         signature: attacker.sign(commitment.as_bytes()),
     };
@@ -399,6 +404,7 @@ fn extension_register_and_mint_use_kernel_supply_and_ownership_checks() {
         call: stale,
         payment,
         authorization: AccountAuthorization {
+            salt: [0; 32],
             public_key: seed.public_key(),
             signature: seed.sign(commitment.as_bytes()),
         },

@@ -9,6 +9,7 @@ The project is organized around a small set of components:
 - `extension` — unified monetary application for coin and asset operations
 - `runtime` — node, P2P networking, synchronization, storage, mining, and RPC
 - `wallet` — local wallet and CLI
+- `devkit` — XPVM assembler and isolated local development workflows
 - `docs` — protocol and RPC documentation
 - `depend` — vendored or project-pinned dependencies
 
@@ -19,11 +20,19 @@ Build and dependency-check configuration is documented in
 [Tooling](docs/TOOLING.md). `Cargo.lock` is committed, and `build.sh` uses
 `--locked` to prevent dependency resolution changes during builds.
 
+## Developer tooling
+
+The [devkit](devkit/README.md) provides a kernel-validated XPVM v4 assembler,
+isolated local devnet runner, counter/vault/asset-transfer examples and lifecycle
+tests. Start with `python3 devkit/devnet/run.py build`, then
+`python3 devkit/devnet/run.py demo`. Its devnet binaries and database are separate
+from normal node/wallet builds and node storage.
+
 ## Program ownership
 
 Coins and assets use a single ownership type: `Owner::Program(ProgramId)`.
 A Program ID is 32 bytes, displayed as 64 hexadecimal characters. Wallets derive
-their ID from the signature policy, signature scheme and public key; public keys
+their ID from the signature policy, signature scheme, public key and 32-byte public salt; public keys
 appear in spending proofs. Wallet accounts require no deployment or stored
 public-key record. Deployed contracts have their own Program IDs and can hold
 and transfer coins and assets through the VM.
@@ -420,6 +429,7 @@ XPARQ Wallet
 10. Program Assets
 11. Deploy Program
 12. Exit
+13. Manage Accounts
 ```
 
 ### Create a wallet
@@ -491,7 +501,8 @@ Restore the mnemonic with the original signature scheme into a new wallet file:
   --wallet restored-wallet.json
 ```
 
-Current wallet files store `program_id`. Older files containing `address` are
+Current wallet files use version 2 and store `program_id`, the selected account salt,
+and a list of account salts. One key can control several separate account ProgramIds. Older files containing `address` are
 not converted automatically. Restoring preserves the signing keys, but derives
 a new Program ID under the current policy domain. It does not migrate funds
 from an older chain.
@@ -782,6 +793,41 @@ use the touched entries instead of copying entire asset tables. See
 [CPU measurements and remaining costs](docs/CPU_VALIDATION.md) for the benchmark
 command and its limits.
 
+[Owner indexes](docs/OWNER_INDEX.md) narrow coin and asset lookups to a program's
+own share IDs. They are rebuilt on restore and excluded from canonical storage
+and state-root encoding.
+
+Program storage is shared across staged ledger copies and VM previews. A write
+copies only the changed program's storage; unchanged values and missing-key
+deletions keep the shared copy. Canonical encoding remains unchanged.
+
+Coin UTXOs, asset records, asset shares and their owner indexes use ordered trees
+with shared branches. Cloning a state shares each root; writes copy only affected
+paths, including within a large owner's index. Sorted encoding and monetary rules
+are unchanged. See [state map implementation and limits](docs/STATE_MAP.md). Program
+registries and deployment indexes also share tree roots. Repeated state-root
+checks reuse a cached hash only when all canonical state components still match;
+a changed state receives the same full hash calculation as before. See
+[state-root cache and compatibility](docs/STATE_ROOT_CACHE.md).
+Cold state-root hashing uses a 64 KiB streaming buffer instead of allocating the
+full canonical ledger payload, with identical encoded bytes and hashes.
+Program-call and deployment size checks count borrowed canonical encoding without
+cloning the authorized transaction or building a full payload buffer. Operation
+limits and protocol burn remain unchanged. Wallet fee calculations also count
+canonical lengths without allocating full size-only buffers.
+Mempool admission retains canonical bytes and operation IDs between requests,
+uses an ID index for duplicates, and persists borrowed byte slices after full
+validation. Each read compares the cache with committed database bytes; mining,
+reorg and recovery changes therefore rebuild stale entries. See
+[mempool cache and measurements](docs/MEMPOOL_SERIALIZATION.md).
+
+Supply validation maintains per-asset share totals from sparse kernel journals
+and checks affected assets against an audited baseline. Root guards force full
+scans for stale summaries or untracked changes. Coin accounting is checked on every
+call, and snapshot restore forces deep asset and coin audits. The derived summaries
+are excluded from canonical bytes. See
+[incremental supply validation and verification](docs/SUPPLY_AUDIT_CACHE.md).
+
 ### Coin spends and Program assets
 
 The kernel owns native XPQ and asset types, checked monetary state, and UTXOs.
@@ -818,9 +864,32 @@ The miner fee is credited to the block miner as a separate UTXO. Protocol burn
 is the verified difference between XPQ inputs, program-owned outputs and the
 miner fee. Coin outputs encode the recipient Program ID.
 
+### Several accounts from one wallet key
+
+The default signature account uses a zero salt. Adding a salt generates a new
+ProgramId from the same public/private key and selects that account:
+
+```bash
+wallet accounts --wallet wallet.json
+wallet account-add --wallet wallet.json
+wallet account-use --salt HEX64 --wallet wallet.json
+```
+
+Use `account-add --salt HEX64` for a chosen 32-byte public salt. Transfer, balance,
+history, asset and deploy commands use the selected account. To recover a
+nondefault account, use `wallet restore ... --salt HEX64`. Preserve the salt list
+with the wallet backup; mnemonic recovery alone cannot reconstruct random salts.
+Custom program IDs continue to bind deployer ProgramId, deploy nonce and code hash.
+See [salted ownership and CLI](docs/OWNERSHIP.md).
+
 ### Protocol and storage compatibility
 
-The current protocol uses **chain-spec version 6** and **database schema 14**.
+The current protocol uses **chain-spec version 8** and **database schema 16**.
+Coin share and asset share identifiers use full domain-separated SHA3-256 hashes
+(32 bytes, displayed as 64 hexadecimal characters). The former 16-byte share
+encoding is rejected. A canonical coin UTXO occupies 73 bytes for state-growth
+burn accounting.
+
 Older databases are incompatible; no automatic migration of ledger state,
 assets or transactions is provided. Use fresh storage for the current chain,
 keeping older databases separate. See [Program ID compatibility](docs/OWNERSHIP.md#compatibility)
@@ -866,6 +935,7 @@ XPARQ/
 ├── extension/    XPQ and asset application implementations
 ├── runtime/      Node runtime
 ├── wallet/       Wallet and CLI
+├── devkit/       XPVM assembler, devnet and examples
 ├── docs/         Protocol and RPC documentation
 ├── depend/       Vendored dependencies
 ├── Cargo.toml

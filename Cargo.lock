@@ -3174,6 +3174,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xparq-devkit"
+version = "0.1.0"
+dependencies = [
+ "kernel",
+]
+
+[[package]]
 name = "xparq-sqisign"
 version = "0.1.0"
 dependencies = [

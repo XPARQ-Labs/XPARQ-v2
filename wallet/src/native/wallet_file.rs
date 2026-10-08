@@ -11,6 +11,64 @@ pub(super) fn write_account_wallet(path: &str, wallet: &AccountWallet) -> Result
     write_private_file_atomically(Path::new(path), &bytes)
 }
 
+/// Update an existing wallet only if it still matches the bytes that were loaded.
+/// An exclusive marker serializes cooperating CLI writers; temp data is owner-only.
+pub(super) fn update_account_wallet(
+    path: &str,
+    wallet: &AccountWallet,
+    expected: &[u8],
+) -> Result<(), String> {
+    let path = fs::canonicalize(path).map_err(|error| format!("resolve wallet path: {error}"))?;
+    let parent = path.parent().ok_or("wallet has no parent directory")?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("wallet has no UTF-8 filename")?;
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let lock_path = parent.join(format!(".{filename}.account.lock"));
+    let mut lock_options = fs::OpenOptions::new();
+    lock_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+    let lock = lock_options.open(&lock_path).map_err(|error| {
+        format!(
+            "wallet account update lock {}: {error}",
+            lock_path.display()
+        )
+    })?;
+    let _lock_cleanup = Cleanup(lock_path);
+    let _lock = lock;
+    let current = Zeroizing::new(
+        fs::read(&path).map_err(|error| format!("read wallet before update: {error}"))?,
+    );
+    if current.as_slice() != expected {
+        return Err("wallet changed during account update; retry".into());
+    }
+    let bytes = account_wallet_file_bytes(wallet)?;
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|error| format!("temporary wallet name: {error}"))?;
+    let temporary = parent.join(format!(".{filename}.{}.tmp", hex::encode(random)));
+    let _temporary_cleanup = Cleanup(temporary.clone());
+    write_new_file(&temporary, &bytes)?;
+    // Recheck before installation to catch noncooperating edits while preparing data.
+    let current = Zeroizing::new(
+        fs::read(&path).map_err(|error| format!("read wallet before install: {error}"))?,
+    );
+    if current.as_slice() != expected {
+        return Err("wallet changed during account update; retry".into());
+    }
+    fs::rename(&temporary, &path).map_err(|error| format!("install updated wallet: {error}"))?;
+    sync_directory(parent)
+}
+
 pub(super) fn write_private_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if path.exists() {
         return Err(format!("wallet already exists: {}", path.display()));

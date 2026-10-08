@@ -3,7 +3,7 @@
 use super::*;
 
 use crypto::{
-    AccountSignatureScheme, ProgramId, SigningSeed, program_id_from_public_key, canonical_bytes,
+    AccountSignatureScheme, ProgramId, SigningSeed, canonical_bytes, program_id_from_public_key,
 };
 
 use crate::{
@@ -80,6 +80,7 @@ fn signed_spend(
         call,
         payment: intent,
         authorization: AccountAuthorization {
+            salt: [0; 32],
             public_key: seed.public_key(),
             signature: seed.sign(commitment.as_bytes()),
         },
@@ -101,7 +102,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
         .apply(
             &call,
             ExecutionContext {
- actor: crate::common::Owner::Program(signer),
+                actor: crate::common::Owner::Program(signer),
                 commitment: [11; 32],
             },
         )
@@ -138,6 +139,7 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
             call: call.clone(),
             payment,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),
             },
@@ -334,7 +336,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         .state
         .extensions
         .assets
-        .shares
+        .shares()
         .keys()
         .copied()
         .collect();
@@ -344,7 +346,10 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         AssetCall::Transfer(Transfer {
             asset,
             inputs,
-            outputs: vec![AssetOutput::new(crate::common::Owner::Program(owner), Unit::from_units(14))],
+            outputs: vec![AssetOutput::new(
+                crate::common::Owner::Program(owner),
+                Unit::from_units(14),
+            )],
         }),
     );
     record(&mut vectors, "program_transfer_block", &transfer);
@@ -358,7 +363,7 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         .state
         .extensions
         .assets
-        .shares
+        .shares()
         .keys()
         .copied()
         .collect();

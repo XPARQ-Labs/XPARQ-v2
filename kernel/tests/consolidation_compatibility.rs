@@ -12,12 +12,12 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
         ]
     );
     // The zero-valued native CoinContract is committed to this chain identity.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 6);
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 8);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            125, 174, 223, 82, 40, 139, 129, 209, 167, 89, 59, 232, 78, 150, 165, 169, 229, 147,
-            30, 144, 196, 183, 169, 4, 114, 53, 122, 228, 62, 25, 244, 217
+            44, 186, 1, 169, 74, 205, 250, 30, 135, 3, 165, 27, 206, 47, 193, 73, 208, 132, 94,
+            170, 210, 206, 135, 31, 71, 231, 51, 170, 49, 100, 190, 66
         ]
     );
     assert_ne!(

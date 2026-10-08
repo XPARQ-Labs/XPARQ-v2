@@ -1,7 +1,11 @@
 use std::{collections::BTreeSet, error::Error as StdError, fmt};
 
 use crate::common::Owner;
-use crypto::{ProgramId, canonical_bytes};
+#[cfg(test)]
+use crate::operation::BlockOperation;
+#[cfg(test)]
+use crypto::canonical_bytes;
+use crypto::{ProgramId, canonical_length};
 
 use crate::{
     common::ChainContext,
@@ -10,7 +14,7 @@ use crate::{
         validate_exact_burn,
     },
     monetary::coin::{CoinOutput, CoinShare, Zeno},
-    operation::BlockOperation,
+    operation::BlockOperationRef,
     program::PreparedProgramInvocation,
     program::{AuthorizedProgramInvocation, IntentError, MAX_PROGRAM_INVOCATION_SIZE},
 };
@@ -62,11 +66,9 @@ pub fn validate_program_call_with_applications(
     transaction
         .validate_structure()
         .map_err(ProgramConsensusError::Intent)?;
-    let transaction_size =
-        canonical_bytes(&BlockOperation::ProgramCall(Box::new(transaction.clone())))
-            .map_err(|_| ProgramConsensusError::Encoding)?
-            .len();
-    if transaction_size > MAX_PROGRAM_INVOCATION_SIZE {
+    let transaction_size = canonical_length(&BlockOperationRef::ProgramCall(&transaction))
+        .map_err(|_| ProgramConsensusError::Encoding)?;
+    if transaction_size > MAX_PROGRAM_INVOCATION_SIZE as u64 {
         return Err(ProgramConsensusError::InvocationTooLarge);
     }
     let valid = transaction
@@ -151,7 +153,7 @@ pub fn validate_program_call_with_applications(
         consumed_coin_utxos: inputs.len() as u64 + vm_quote.consumed_coin_utxos,
         created_state_weight,
     };
-    let required_burn = ProtocolBurn::for_program_call(transition, transaction_size as u64)?
+    let required_burn = ProtocolBurn::for_program_call(transition, transaction_size)?
         .total()?
         .checked_add(Zeno::from_zeno(vm_fuel))
         .ok_or(ProgramConsensusError::ZenoOverflow)?;
@@ -204,10 +206,7 @@ pub(crate) fn validate_coin_inputs(
     ensure_unique_coin_ids(inputs.iter().copied())?;
     // A registered contract must execute its own policy; a matching key proof
     // must never turn it into an implicit signature-policy account.
-    if state
-        .registry()
-        .is_some_and(|r| r.contains(&(signer)))
-    {
+    if state.registry().is_some_and(|r| r.contains(&(signer))) {
         return Err(ProgramConsensusError::InvalidAuthorization);
     }
     let mut input_total = Zeno::ZERO;
@@ -305,9 +304,7 @@ impl From<BurnError> for ProgramConsensusError {
 mod p3e_authorization_gate_tests {
     use super::*;
 
-    use crypto::{
-        AccountSignatureScheme, HASH_SIZE, HASH16_SIZE, SigningSeed, program_id_from_public_key,
-    };
+    use crypto::{AccountSignatureScheme, HASH_SIZE, SigningSeed, program_id_from_public_key};
 
     use crate::{
         monetary::coin::{CoinOutput, Zeno},
@@ -336,7 +333,7 @@ mod p3e_authorization_gate_tests {
 
         CoinTransition::coin(
             owner,
-            vec![CoinShare::from_bytes([input_tag; HASH16_SIZE])],
+            vec![CoinShare::from_bytes([input_tag; HASH_SIZE])],
             vec![CoinOutput::new(owner, Zeno::from_zeno(amount))],
         )
         .expect("valid coin fixture")
@@ -355,6 +352,7 @@ mod p3e_authorization_gate_tests {
             call,
             payment: intent,
             authorization: AccountAuthorization {
+                salt: [0; 32],
                 public_key: signer_seed.public_key(),
                 signature: signer_seed.sign(commitment.as_bytes()),
             },
@@ -392,7 +390,7 @@ mod p3e_authorization_gate_tests {
             opcode: 0,
             payload: id.as_bytes().to_vec(),
         };
-        let input = CoinShare::from_bytes([9; HASH16_SIZE]);
+        let input = CoinShare::from_bytes([9; HASH_SIZE]);
         let input_amount = Zeno::from_zeno(1_000_000);
         struct VmState {
             registry: ProgramRegistry,
@@ -434,6 +432,7 @@ mod p3e_authorization_gate_tests {
                 call: call.clone(),
                 payment,
                 authorization: AccountAuthorization {
+                    salt: [0; 32],
                     public_key: owner.public_key(),
                     signature: owner.sign(commitment.as_bytes()),
                 },

@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, io::Read};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crypto::{ProgramId, HASH_SIZE, HashDomain, canonical_bytes, domain};
+use crypto::{HASH_SIZE, HashDomain, ProgramId, canonical_bytes, domain};
 
 use crypto::ChainContext;
 
@@ -144,7 +144,7 @@ impl CoinTransition {
 mod conservation_tests {
     use super::*;
     use crate::monetary::coin::{CoinOutput, CoinShare, Zeno};
-    use crypto::HASH16_SIZE;
+    use crypto::HASH_SIZE;
 
     fn program_id(byte: u8) -> ProgramId {
         ProgramId([byte; crypto::PROGRAM_ID_SIZE])
@@ -152,7 +152,7 @@ mod conservation_tests {
 
     #[test]
     fn duplicate_coin_inputs_are_rejected_structurally() {
-        let input = CoinShare::from_bytes([0x11; HASH16_SIZE]);
+        let input = CoinShare::from_bytes([0x11; HASH_SIZE]);
 
         let result = CoinTransition::coin(
             program_id(1),
@@ -165,7 +165,7 @@ mod conservation_tests {
 
     #[test]
     fn zero_value_coin_output_is_rejected_structurally() {
-        let input = CoinShare::from_bytes([0x44; HASH16_SIZE]);
+        let input = CoinShare::from_bytes([0x44; HASH_SIZE]);
 
         let result = CoinTransition::coin(
             program_id(1),

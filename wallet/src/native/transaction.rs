@@ -261,10 +261,8 @@ fn automatic_fee_transaction_at_rates(
     let mut archival_burn = 0_u64;
     for _ in 0..MAX_FEE_CONVERGENCE_ROUNDS {
         let transaction = build(fee, archival_burn)?;
-        let size = canonical_bytes(&transaction)
-            .map_err(|error| error.to_string())?
-            .len();
-        let size = u64::try_from(size).map_err(|_| "transaction byte length overflow")?;
+        let size =
+            kernel::crypto::canonical_length(&transaction).map_err(|error| error.to_string())?;
         let required_fee = size
             .checked_mul(miner_fee_rate)
             .ok_or("automatic transaction fee overflow")?;

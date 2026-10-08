@@ -8,6 +8,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
+pub const ACCOUNT_SALT_SIZE: usize = 32;
+pub type AccountSalt = [u8; ACCOUNT_SALT_SIZE];
+pub const DEFAULT_ACCOUNT_SALT: AccountSalt = [0; ACCOUNT_SALT_SIZE];
+
 pub const PROGRAM_ID_SIZE: usize = HASH_SIZE;
 pub const PROGRAM_ID_STRING_LEN: usize = 2 * PROGRAM_ID_SIZE;
 
@@ -43,13 +47,22 @@ impl ProgramId {
         scheme: AccountSignatureScheme,
         public_key: &[u8],
     ) -> Result<Self, CryptoError> {
+        Self::signature_account_with_salt(scheme, public_key, &DEFAULT_ACCOUNT_SALT)
+    }
+
+    pub fn signature_account_with_salt(
+        scheme: AccountSignatureScheme,
+        public_key: &[u8],
+        salt: &AccountSalt,
+    ) -> Result<Self, CryptoError> {
         if public_key.len() != scheme.public_key_size() {
             return Err(CryptoError::InvalidPublicKeyLength);
         }
-        let mut material = Vec::with_capacity(26 + public_key.len());
-        material.extend_from_slice(b"xparq:signature-policy:v1");
+        let mut material = Vec::with_capacity(26 + public_key.len() + ACCOUNT_SALT_SIZE);
+        material.extend_from_slice(b"xparq:signature-policy:v2");
         material.push(scheme.id());
         material.extend_from_slice(public_key);
+        material.extend_from_slice(salt);
         Ok(Self(
             domain(HashDomain::ProgramAccount, &material).into_bytes(),
         ))
@@ -93,6 +106,12 @@ impl FromStr for ProgramId {
 pub fn program_id_from_public_key(public_key: &PublicKey) -> Result<ProgramId, CryptoError> {
     ProgramId::signature_account(public_key.scheme(), &public_key.bytes)
 }
+pub fn program_id_from_public_key_with_salt(
+    public_key: &PublicKey,
+    salt: &AccountSalt,
+) -> Result<ProgramId, CryptoError> {
+    ProgramId::signature_account_with_salt(public_key.scheme(), &public_key.bytes, salt)
+}
 pub fn program_id_from_string(value: &str) -> Result<ProgramId, CryptoError> {
     value.parse()
 }
@@ -103,6 +122,34 @@ pub fn program_id_to_string(id: &ProgramId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn salts_separate_instances_without_changing_the_key() {
+        for scheme in AccountSignatureScheme::ALL {
+            let key = PublicKey {
+                account: scheme,
+                bytes: vec![0xa5; scheme.public_key_size()],
+            };
+            let zero = program_id_from_public_key(&key).unwrap();
+            let a = program_id_from_public_key_with_salt(&key, &[1; 32]).unwrap();
+            let b = program_id_from_public_key_with_salt(&key, &[2; 32]).unwrap();
+            // Independent Python hashlib fixture for a nonzero account salt.
+            let expected = match scheme.id() {
+                1 => "44af36b8b03e8101b2b9f91a20461d7addb05f40401209ee2ebd50c29812bada",
+                2 => "18e5bebdda03b18f0f26373cd06f8d6b87079849988332979eeb30a9ee82ace5",
+                3 => "63c8ed79e031d7dec6f07768e925dd794ea0207cc58770cb57071825ed40eb3f",
+                _ => unreachable!(),
+            };
+            assert_eq!(a.to_string(), expected);
+            assert_ne!(zero, a);
+            assert_ne!(a, b);
+            assert_ne!(zero, b);
+            assert_eq!(
+                a,
+                ProgramId::signature_account_with_salt(scheme, &key.bytes, &[1; 32]).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn program_ids_have_one_bounded_hex_encoding() {
         let id = ProgramId([0xab; PROGRAM_ID_SIZE]);
@@ -126,9 +173,9 @@ mod tests {
             let id = ProgramId::signature_account(scheme, &bytes).unwrap();
             // Independent Python hashlib SHA3-256 fixtures for the framed preimage.
             let expected = match scheme.id() {
-                1 => "101d5baaa1d0eab6285e7854e79f14e05cf8026549be53f8a8404ab865c32152",
-                2 => "db947f9ed968673db36cd796d95a18da47c1facd5f059eaae7c2e67a0a61d9a7",
-                3 => "659e13ff0dcb80d7302fd0461e7d03cd954483273cfde3feadf3836e1a305b8f",
+                1 => "fc6646f88ebf852c4e1c393e5101e6ae1a5e476e57241bf8c2abac1819bbde60",
+                2 => "d04d5404b7d15cdad674789d7998d70e540d1023c79c671cda21b89d0e9a4d9a",
+                3 => "56094227bae261c7a5c7cd0ac06638d83d0abcdd246fa2cf71c20c68a2e40616",
                 _ => unreachable!(),
             };
             assert_eq!(id.to_string(), expected);

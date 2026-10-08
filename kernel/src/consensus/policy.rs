@@ -9,7 +9,7 @@ use crate::{
     monetary::coin::{CoinOutput, Zeno},
 };
 
-use crypto::{PROGRAM_ID_SIZE, ProgramId, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
+use crypto::{HASH_SIZE, Hash, HashDomain, PROGRAM_ID_SIZE, ProgramId, canonical_bytes, domain};
 
 pub const WBDA_WINDOW: usize = 2_500;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
@@ -471,7 +471,7 @@ mod state_burn_tests {
                 COIN_UTXO_STATE_WEIGHT
             );
         }
-        assert_eq!(COIN_UTXO_STATE_WEIGHT, 57);
+        assert_eq!(COIN_UTXO_STATE_WEIGHT, 73);
         assert_eq!(
             MINER_PROTOCOL_BURN.as_zeno(),
             (EMPTY_BLOCK_ARCHIVAL_BYTES + COIN_UTXO_STATE_WEIGHT) * STATE_BURN_RATE_ZENO_PER_BYTE

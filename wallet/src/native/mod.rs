@@ -129,6 +129,9 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         None | Some("menu") | Some("interactive") => interactive_menu(),
         Some("new") => create_wallet(&args[1..]),
         Some("restore") => restore_wallet(&args[1..]),
+        Some(command @ ("accounts" | "account-add" | "account-use")) => {
+            manage_accounts(command, &args[1..])
+        }
         Some("program-id") => print_program_id(&args[1..]),
         Some("balance") => print_balance(&args[1..]),
         Some("history") => print_history(&args[1..]),
@@ -164,7 +167,7 @@ mod wallet_file;
 
 use wallet_file::{load_wallet, write_account_wallet};
 
-use cli::{create_wallet, interactive_menu, print_program_id, restore_wallet};
+use cli::{create_wallet, interactive_menu, manage_accounts, print_program_id, restore_wallet};
 use util::{format_amount, has_flag, option, parse_amount, print_help, repeated_options};
 
 use balance::print_balance;
